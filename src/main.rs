@@ -308,24 +308,26 @@ fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize
             },
             'I' => {
                 // Insertion only advances query
-                if count > remaining_bp {
-                    new_ops.insert(0, CigarOp(op, count - remaining_bp));
-                    query_bases_removed += remaining_bp;
-                    remaining_bp = 0;
+                query_bases_removed += count;
+                
+                // If we still have remaining_bp to erode, we skip this insertion
+                // Otherwise, we keep it
+                if remaining_bp > 0 {
+                    // Skip this operation (don't add to new_ops)
                 } else {
-                    query_bases_removed += count;
-                    remaining_bp -= count;
+                    new_ops.insert(0, CigarOp(op, count));
                 }
             },
             'D' => {
                 // Deletion only advances target
-                if count > remaining_bp {
-                    new_ops.insert(0, CigarOp(op, count - remaining_bp));
-                    target_bases_removed += remaining_bp;
-                    remaining_bp = 0;
+                target_bases_removed += count;
+                
+                // If we still have remaining_bp to erode, we skip this deletion
+                // Otherwise, we keep it
+                if remaining_bp > 0 {
+                    // Skip this operation (don't add to new_ops)
                 } else {
-                    target_bases_removed += count;
-                    remaining_bp -= count;
+                    new_ops.insert(0, CigarOp(op, count));
                 }
             },
             _ => new_ops.insert(0, CigarOp(op, count)), // Keep other operations
@@ -341,6 +343,7 @@ fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize
     
     Ok((cigar_to_string(&new_ops), query_bases_removed, target_bases_removed))
 }
+
 /// Erode (remove) a specified number of base pairs from the start of a CIGAR string
 /// Returns the eroded CIGAR string and the number of bases removed from query and target
 fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
@@ -355,6 +358,7 @@ fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usi
     while i < ops.len() && remaining_bp > 0 {
         let CigarOp(op, count) = ops[i];
         info!("erode_cigar_start - Last operation: {}{}", count, op);
+        
         match op {
             '=' | 'X' | 'M' => {
                 // These operations advance both sequences
@@ -373,24 +377,26 @@ fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usi
             },
             'I' => {
                 // Insertion only advances query
-                if count > remaining_bp {
-                    new_ops.push(CigarOp(op, count - remaining_bp));
-                    query_bases_removed += remaining_bp;
-                    remaining_bp = 0;
+                query_bases_removed += count;
+                
+                // If we still have remaining_bp to erode, we skip this insertion
+                // Otherwise, we keep it
+                if remaining_bp > 0 {
+                    // Skip this operation (don't add to new_ops)
                 } else {
-                    query_bases_removed += count;
-                    remaining_bp -= count;
+                    new_ops.push(CigarOp(op, count));
                 }
             },
             'D' => {
                 // Deletion only advances target
-                if count > remaining_bp {
-                    new_ops.push(CigarOp(op, count - remaining_bp));
-                    target_bases_removed += remaining_bp;
-                    remaining_bp = 0;
+                target_bases_removed += count;
+                
+                // If we still have remaining_bp to erode, we skip this deletion
+                // Otherwise, we keep it
+                if remaining_bp > 0 {
+                    // Skip this operation (don't add to new_ops)
                 } else {
-                    target_bases_removed += count;
-                    remaining_bp -= count;
+                    new_ops.push(CigarOp(op, count));
                 }
             },
             _ => new_ops.push(CigarOp(op, count)), // Keep other operations
