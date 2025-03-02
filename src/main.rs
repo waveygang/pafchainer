@@ -456,11 +456,11 @@ fn align_sequences_wfa(
 fn wfa_align(query: &[u8], target: &[u8]) -> Result<String, Box<dyn Error>> {
     // Initialize the WFA aligner with gap-affine penalties
     let match_score = 0;
-    let mismatch = 4;
-    let gap_open1 = 6;
+    let mismatch = 3;
+    let gap_open1 = 4;
     let gap_ext1 = 2;
-    let gap_open2 = 6;
-    let gap_ext2 = 2;
+    let gap_open2 = 24;
+    let gap_ext2 = 1;
     
     // Create aligner and configure settings
     let mut aligner = AffineWavefronts::with_penalties_affine2p(
@@ -711,6 +711,39 @@ fn process_chain(
         return Ok(chain.to_vec());
     }
     
+    // First, calculate the average md:f value from all entries in the chain
+    let mut total_md = 0.0;
+    let mut count_md = 0;
+    
+    for entry in chain {
+        // Find the md:f tag if it exists
+        for (tag, value) in &entry.tags {
+            if tag == "md:f" {
+                if let Ok(md_value) = value.parse::<f64>() {
+                    total_md += md_value;
+                    count_md += 1;
+                }
+                break;
+            }
+        }
+    }
+    
+    // Calculate average md:f value
+    let avg_md = if count_md > 0 {
+        total_md / count_md as f64
+    } else {
+        // Default value if no md:f tags found
+        0.0
+    };
+    
+    // Format average md:f value
+    let avg_md_str = format!("{:.6}", avg_md)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string();
+    
+    info!("Average md:f value for chain: {}", avg_md_str);
+    
     let mut merged_entry = chain[0].clone();
     
     for i in 0..(chain.len() - 1) {
@@ -737,11 +770,9 @@ fn process_chain(
               next_query_bases_removed, next_target_bases_removed);
         
         // Calculate correct coordinates for sequence extraction based on actual bases removed
-        // Current entry - end coordinates adjusted by removed bases
         let current_query_extract_start = current.query_end - current_query_bases_removed as u64;
         let current_target_extract_start = current.target_end - current_target_bases_removed as u64;
         
-        // Next entry - start coordinates adjusted by removed bases
         let next_query_extract_end = next.query_start + next_query_bases_removed as u64;
         let next_target_extract_end = next.target_start + next_target_bases_removed as u64;
         
@@ -834,16 +865,10 @@ fn process_chain(
             tag_positions.insert(tag.as_str(), i);
         }
         
-        // Calculate MD tag value
-        let md_value = format!("{:.6}", (matches as f64) / (matches + mismatches + inserted_bp + deleted_bp) as f64)
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string();
-            
         // Create a map for new tag values
         let mut new_tag_values = HashMap::new();
         for (tag, value) in &current.tags {
-            if !matches!(tag.as_str(), "gi:f" | "bi:f" | "cg:Z" | "md:f") {
+            if !matches!(tag.as_str(), "gi:f" | "bi:f" | "cg:Z" | "md:f" | "chain:i") {
                 new_tag_values.insert(tag.as_str(), value.clone());
             }
         }
@@ -852,7 +877,12 @@ fn process_chain(
         new_tag_values.insert("gi:f", gi_str);
         new_tag_values.insert("bi:f", bi_str);
         new_tag_values.insert("cg:Z", merged_cigar.clone());
-        new_tag_values.insert("md:f", md_value);
+        new_tag_values.insert("md:f", avg_md_str.clone());
+        
+        // Fix chain:i tag to have correct chain_len and chain_pos values
+        // Format: chain_id.chain_len.chain_pos
+        let chain_tag_value = format!("{}.1.1", current.chain_id);
+        new_tag_values.insert("chain:i", chain_tag_value);
         
         // Create ordered tags vector preserving original order
         let mut new_tags = Vec::new();
@@ -875,19 +905,19 @@ fn process_chain(
             query_name: current.query_name,
             query_length: current.query_length,
             query_start: current.query_start,
-            query_end: computed_query_end, // Use computed coordinate
+            query_end: computed_query_end,
             strand: current.strand,
             target_name: current.target_name,
             target_length: current.target_length,
             target_start: current.target_start,
-            target_end: computed_target_end, // Use computed coordinate
+            target_end: computed_target_end,
             num_matches: matches,
             alignment_length: block_len,
-            mapping_quality: 255, // Use a high mapping quality for merged alignments
+            mapping_quality: 255, // High mapping quality for merged alignments
             tags: new_tags,
             chain_id: current.chain_id,
-            chain_length: current.chain_length,
-            chain_pos: current.chain_pos,
+            chain_length: 1,  // Set chain_length to 1
+            chain_pos: 1,     // Set chain_pos to 1
             cigar: merged_cigar,
         };
     }
