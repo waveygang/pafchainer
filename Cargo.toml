@@ -1,0 +1,17 @@
+[package]
+name = "chainer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Andrea Guarracino <aguarra1@uthsc.edu>"]
+description = "A tool to process PAF files and connect chains using WFA2 alignment"
+
+[dependencies]
+clap = { version = "4.5.31", features = ["derive"] }
+bio = "2.2.0"
+
+#lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "c608c436a6753d2c21c97d9f5c338efae99d042b"}
+
+log = "0.4.22"
+env_logger = "0.11.5"
+thiserror = "2.0.11"
