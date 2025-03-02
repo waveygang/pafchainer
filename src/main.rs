@@ -281,50 +281,66 @@ fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize
     let mut query_bases_removed = 0;
     let mut target_bases_removed = 0;
     
-    // Process all operations except potentially the last one
-    for i in 0..ops.len() - 1 {
-        new_ops.push(ops[i]);
-    }
-    
-    // Process the last operation
-    if let Some(&CigarOp(op, count)) = ops.last() {
+    // Copy operations from the beginning, up to the point where we need to erode
+    let mut i = 0;
+    while i < ops.len() && remaining_bp > 0 {
+        // Processing operations from the end, moving backward
+        let idx = ops.len() - 1 - i;
+        let CigarOp(op, count) = ops[idx];
+        
+        info!("erode_cigar_end - Processing operation: {}{}", count, op);
+        
         match op {
             '=' | 'X' | 'M' => {
                 // These operations advance both sequences
                 if count > remaining_bp {
-                    new_ops.push(CigarOp(op, count - remaining_bp));
+                    // Partial erosion of this operation
+                    new_ops.insert(0, CigarOp(op, count - remaining_bp));
                     query_bases_removed += remaining_bp;
                     target_bases_removed += remaining_bp;
+                    remaining_bp = 0;
                 } else {
+                    // Complete erosion of this operation
                     query_bases_removed += count;
                     target_bases_removed += count;
+                    remaining_bp -= count;
                 }
             },
             'I' => {
                 // Insertion only advances query
                 if count > remaining_bp {
-                    new_ops.push(CigarOp(op, count - remaining_bp));
+                    new_ops.insert(0, CigarOp(op, count - remaining_bp));
                     query_bases_removed += remaining_bp;
+                    remaining_bp = 0;
                 } else {
                     query_bases_removed += count;
+                    remaining_bp -= count;
                 }
             },
             'D' => {
                 // Deletion only advances target
                 if count > remaining_bp {
-                    new_ops.push(CigarOp(op, count - remaining_bp));
+                    new_ops.insert(0, CigarOp(op, count - remaining_bp));
                     target_bases_removed += remaining_bp;
+                    remaining_bp = 0;
                 } else {
                     target_bases_removed += count;
+                    remaining_bp -= count;
                 }
             },
-            _ => new_ops.push(CigarOp(op, count)), // Keep other operations
+            _ => new_ops.insert(0, CigarOp(op, count)), // Keep other operations
         }
+        
+        i += 1;
+    }
+    
+    // Add remaining operations from the beginning of the CIGAR string
+    for j in 0..(ops.len() - i) {
+        new_ops.insert(j, ops[j]);
     }
     
     Ok((cigar_to_string(&new_ops), query_bases_removed, target_bases_removed))
 }
-
 /// Erode (remove) a specified number of base pairs from the start of a CIGAR string
 /// Returns the eroded CIGAR string and the number of bases removed from query and target
 fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
@@ -338,7 +354,7 @@ fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usi
     let mut i = 0;
     while i < ops.len() && remaining_bp > 0 {
         let CigarOp(op, count) = ops[i];
-        
+        info!("erode_cigar_start - Last operation: {}{}", count, op);
         match op {
             '=' | 'X' | 'M' => {
                 // These operations advance both sequences
@@ -711,7 +727,7 @@ fn process_chain(
         return Ok(chain.to_vec());
     }
     
-    // First, calculate the average md:f value from all entries in the chain
+    // Calculate the average md:f value from all entries in the chain
     let mut total_md = 0.0;
     let mut count_md = 0;
     
@@ -776,6 +792,21 @@ fn process_chain(
         let next_query_extract_end = next.query_start + next_query_bases_removed as u64;
         let next_target_extract_end = next.target_start + next_target_bases_removed as u64;
         
+        // Check if we have continuity in coordinates
+        let query_gap = if next.query_start > current.query_end {
+            next.query_start - current.query_end
+        } else {
+            0 // Overlapping or exactly contiguous
+        };
+        
+        let target_gap = if next.target_start > current.target_end {
+            next.target_start - current.target_end
+        } else {
+            0 // Overlapping or exactly contiguous
+        };
+        
+        info!("Query gap: {}, Target gap: {}", query_gap, target_gap);
+        
         // Get sequences for boundary regions using rust-htslib, with correct coordinates
         let current_query_seq = query_db.get_subsequence(
             &current.query_name,
@@ -811,21 +842,54 @@ fn process_chain(
         info!("Next query seq length: {}, Next target seq length: {}", 
               next_query_seq.len(), next_target_seq.len());
         
-        // Combine sequences to create a gap sequence
-        let mut gap_query = Vec::new();
-        gap_query.extend_from_slice(&current_query_seq);
-        gap_query.extend_from_slice(&next_query_seq);
+        // If there's a gap, also get the gap sequences
+        let mut gap_query_seq = Vec::new();
+        let mut gap_target_seq = Vec::new();
         
-        let mut gap_target = Vec::new();
-        gap_target.extend_from_slice(&current_target_seq);
-        gap_target.extend_from_slice(&next_target_seq);
+        if query_gap > 0 {
+            let gap_query = query_db.get_subsequence(
+                &current.query_name,
+                current.query_end,
+                next.query_start,
+                current.strand == '-'
+            ).map_err(|e| format!("Failed to get gap query sequence: {}", e))?;
+            gap_query_seq = gap_query;
+            info!("Got gap query sequence of length {}", gap_query_seq.len());
+        }
         
-        // Perform WFA alignment on the gap
-        info!("Performing WFA alignment for gap region...");
-        let gap_cigar = wfa_align(&gap_query, &gap_target)?;
+        if target_gap > 0 {
+            let gap_target = target_db.get_subsequence(
+                &current.target_name,
+                current.target_end,
+                next.target_start,
+                false
+            ).map_err(|e| format!("Failed to get gap target sequence: {}", e))?;
+            gap_target_seq = gap_target;
+            info!("Got gap target sequence of length {}", gap_target_seq.len());
+        }
+        
+        // Combine sequences to create a complete sequence
+        let mut full_query = Vec::new();
+        full_query.extend_from_slice(&current_query_seq);
+        if !gap_query_seq.is_empty() {
+            full_query.extend_from_slice(&gap_query_seq);
+        }
+        full_query.extend_from_slice(&next_query_seq);
+        
+        let mut full_target = Vec::new();
+        full_target.extend_from_slice(&current_target_seq);
+        if !gap_target_seq.is_empty() {
+            full_target.extend_from_slice(&gap_target_seq);
+        }
+        full_target.extend_from_slice(&next_target_seq);
+        
+        // Perform WFA alignment on the combined sequences
+        info!("Performing WFA alignment for combined regions...");
+        info!("Full query length: {}, Full target length: {}", full_query.len(), full_target.len());
+        let combined_cigar = wfa_align(&full_query, &full_target)?;
         
         // Merge the CIGARs
-        let merged_cigar = merge_cigars(&[&eroded_current_cigar, &gap_cigar, &eroded_next_cigar])?;
+        let merged_cigar = merge_cigars(&[&eroded_current_cigar, &combined_cigar, &eroded_next_cigar])?;
         
         // Calculate alignment statistics from the merged CIGAR
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = 
