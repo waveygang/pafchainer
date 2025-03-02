@@ -273,68 +273,123 @@ fn cigar_to_string(ops: &[CigarOp]) -> String {
 }
 
 /// Erode (remove) a specified number of base pairs from the end of a CIGAR string
-fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<String, Box<dyn Error>> {
+/// Returns the eroded CIGAR string and the number of bases removed from query and target
+fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
     let ops = parse_cigar(cigar)?;
     let mut new_ops = Vec::new();
     let mut remaining_bp = bp_count;
+    let mut query_bases_removed = 0;
+    let mut target_bases_removed = 0;
     
-    for i in 0..ops.len() {
-        let CigarOp(op, count) = ops[i];
-        
-        if remaining_bp == 0 || i < ops.len() - 1 {
-            // Keep operations that are not at the end
-            new_ops.push(CigarOp(op, count));
-            continue;
-        }
-        
-        // Process the last operation
+    // Process all operations except potentially the last one
+    for i in 0..ops.len() - 1 {
+        new_ops.push(ops[i]);
+    }
+    
+    // Process the last operation
+    if let Some(&CigarOp(op, count)) = ops.last() {
         match op {
-            '=' | 'X' | 'M' | 'I' | 'D' => {
+            '=' | 'X' | 'M' => {
+                // These operations advance both sequences
                 if count > remaining_bp {
                     new_ops.push(CigarOp(op, count - remaining_bp));
-                    remaining_bp = 0;
+                    query_bases_removed += remaining_bp;
+                    target_bases_removed += remaining_bp;
                 } else {
-                    remaining_bp -= count;
+                    query_bases_removed += count;
+                    target_bases_removed += count;
+                }
+            },
+            'I' => {
+                // Insertion only advances query
+                if count > remaining_bp {
+                    new_ops.push(CigarOp(op, count - remaining_bp));
+                    query_bases_removed += remaining_bp;
+                } else {
+                    query_bases_removed += count;
+                }
+            },
+            'D' => {
+                // Deletion only advances target
+                if count > remaining_bp {
+                    new_ops.push(CigarOp(op, count - remaining_bp));
+                    target_bases_removed += remaining_bp;
+                } else {
+                    target_bases_removed += count;
                 }
             },
             _ => new_ops.push(CigarOp(op, count)), // Keep other operations
         }
     }
     
-    Ok(cigar_to_string(&new_ops))
+    Ok((cigar_to_string(&new_ops), query_bases_removed, target_bases_removed))
 }
 
 /// Erode (remove) a specified number of base pairs from the start of a CIGAR string
-fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<String, Box<dyn Error>> {
+/// Returns the eroded CIGAR string and the number of bases removed from query and target
+fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
     let ops = parse_cigar(cigar)?;
     let mut new_ops = Vec::new();
     let mut remaining_bp = bp_count;
+    let mut query_bases_removed = 0;
+    let mut target_bases_removed = 0;
     
-    for i in (0..ops.len()).rev() {
+    // Skip or partially include the first operations until we've eroded enough
+    let mut i = 0;
+    while i < ops.len() && remaining_bp > 0 {
         let CigarOp(op, count) = ops[i];
         
-        if remaining_bp == 0 || i > 0 {
-            // Keep operations that are not at the start
-            new_ops.push(CigarOp(op, count));
-            continue;
-        }
-        
-        // Process the first operation
         match op {
-            '=' | 'X' | 'M' | 'I' | 'D' => {
+            '=' | 'X' | 'M' => {
+                // These operations advance both sequences
                 if count > remaining_bp {
+                    // Partial erosion of this operation
                     new_ops.push(CigarOp(op, count - remaining_bp));
+                    query_bases_removed += remaining_bp;
+                    target_bases_removed += remaining_bp;
                     remaining_bp = 0;
                 } else {
+                    // Complete erosion of this operation
+                    query_bases_removed += count;
+                    target_bases_removed += count;
+                    remaining_bp -= count;
+                }
+            },
+            'I' => {
+                // Insertion only advances query
+                if count > remaining_bp {
+                    new_ops.push(CigarOp(op, count - remaining_bp));
+                    query_bases_removed += remaining_bp;
+                    remaining_bp = 0;
+                } else {
+                    query_bases_removed += count;
+                    remaining_bp -= count;
+                }
+            },
+            'D' => {
+                // Deletion only advances target
+                if count > remaining_bp {
+                    new_ops.push(CigarOp(op, count - remaining_bp));
+                    target_bases_removed += remaining_bp;
+                    remaining_bp = 0;
+                } else {
+                    target_bases_removed += count;
                     remaining_bp -= count;
                 }
             },
             _ => new_ops.push(CigarOp(op, count)), // Keep other operations
         }
+        
+        i += 1;
     }
     
-    new_ops.reverse(); // Reverse since we processed from the end
-    Ok(cigar_to_string(&new_ops))
+    // Add all remaining operations
+    while i < ops.len() {
+        new_ops.push(ops[i]);
+        i += 1;
+    }
+    
+    Ok((cigar_to_string(&new_ops), query_bases_removed, target_bases_removed))
 }
 
 /// Convert a u8 CIGAR from WFA to a vector of operations with counts
@@ -660,7 +715,7 @@ fn process_chain(
     
     for i in 0..(chain.len() - 1) {
         // Create a copy of the current entry to avoid borrowing issues
-        let current = if i == 0 { chain[0].clone() } else { merged_entry.clone() };
+        let current = if i == 0 { chain[0].clone() } else { merged_entry };
         let next = &chain[i+1];
         
         info!("Processing chain pair {}/{}", i+1, chain.len()-1);
@@ -669,14 +724,31 @@ fn process_chain(
         let current_cigar = &current.cigar;
         let next_cigar = &next.cigar;
         
-        // Erode CIGARs at the boundaries
-        let eroded_current_cigar = erode_cigar_end(current_cigar, erosion_size)?;
-        let eroded_next_cigar = erode_cigar_start(next_cigar, erosion_size)?;
+        // Erode CIGARs at the boundaries and get the removed bases counts
+        let (eroded_current_cigar, current_query_bases_removed, current_target_bases_removed) = 
+            erode_cigar_end(current_cigar, erosion_size)?;
         
-        // Get sequences for boundary regions using rust-htslib
+        let (eroded_next_cigar, next_query_bases_removed, next_target_bases_removed) = 
+            erode_cigar_start(next_cigar, erosion_size)?;
+        
+        info!("Eroded current: query={}, target={} bases", 
+              current_query_bases_removed, current_target_bases_removed);
+        info!("Eroded next: query={}, target={} bases", 
+              next_query_bases_removed, next_target_bases_removed);
+        
+        // Calculate correct coordinates for sequence extraction based on actual bases removed
+        // Current entry - end coordinates adjusted by removed bases
+        let current_query_extract_start = current.query_end - current_query_bases_removed as u64;
+        let current_target_extract_start = current.target_end - current_target_bases_removed as u64;
+        
+        // Next entry - start coordinates adjusted by removed bases
+        let next_query_extract_end = next.query_start + next_query_bases_removed as u64;
+        let next_target_extract_end = next.target_start + next_target_bases_removed as u64;
+        
+        // Get sequences for boundary regions using rust-htslib, with correct coordinates
         let current_query_seq = query_db.get_subsequence(
             &current.query_name,
-            current.query_end - erosion_size as u64,
+            current_query_extract_start,
             current.query_end,
             current.strand == '-'
         ).map_err(|e| format!("Failed to get query sequence for {}: {}", current.query_name, e))?;
@@ -684,13 +756,13 @@ fn process_chain(
         let next_query_seq = query_db.get_subsequence(
             &next.query_name,
             next.query_start,
-            next.query_start + erosion_size as u64,
+            next_query_extract_end,
             next.strand == '-'
         ).map_err(|e| format!("Failed to get query sequence for {}: {}", next.query_name, e))?;
         
         let current_target_seq = target_db.get_subsequence(
             &current.target_name,
-            current.target_end - erosion_size as u64,
+            current_target_extract_start,
             current.target_end,
             false
         ).map_err(|e| format!("Failed to get target sequence for {}: {}", current.target_name, e))?;
@@ -698,9 +770,15 @@ fn process_chain(
         let next_target_seq = target_db.get_subsequence(
             &next.target_name,
             next.target_start,
-            next.target_start + erosion_size as u64,
+            next_target_extract_end,
             false
         ).map_err(|e| format!("Failed to get target sequence for {}: {}", next.target_name, e))?;
+        
+        // Log sequence lengths for debugging
+        info!("Current query seq length: {}, Current target seq length: {}", 
+              current_query_seq.len(), current_target_seq.len());
+        info!("Next query seq length: {}, Next target seq length: {}", 
+              next_query_seq.len(), next_target_seq.len());
         
         // Combine sequences to create a gap sequence
         let mut gap_query = Vec::new();
