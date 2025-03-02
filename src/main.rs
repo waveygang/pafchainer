@@ -149,7 +149,7 @@ impl PafEntry {
             self.mapping_quality
         );
         
-        // Add tags
+        // Add tags in the expected order
         for (tag, value) in &self.tags {
             line.push_str(&format!("\t{}:{}", tag, value));
         }
@@ -828,26 +828,47 @@ fn process_chain(
                   computed_target_end, next.target_end);
         }
         
-        // Clone tags we want to preserve before creating the new merged_entry
-        let mut new_tags = Vec::new();
-        // Copy any tags that aren't related to the alignment statistics
-        for (tag, value) in &current.tags {
-            if !matches!(tag.as_str(), "gi:f" | "bi:f" | "cg:Z" | "md:f") {
-                new_tags.push((tag.clone(), value.clone()));
-            }
+        // Create a map of the current tag order by position
+        let mut tag_positions = HashMap::new();
+        for (i, (tag, _)) in current.tags.iter().enumerate() {
+            tag_positions.insert(tag.as_str(), i);
         }
         
-        // Add updated alignment statistic tags
-        new_tags.push(("gi:f".to_string(), gi_str));
-        new_tags.push(("bi:f".to_string(), bi_str));
-        new_tags.push(("cg:Z".to_string(), merged_cigar.clone()));
-        
-        // Add MD tag if needed (we could calculate this from the CIGAR)
+        // Calculate MD tag value
         let md_value = format!("{:.6}", (matches as f64) / (matches + mismatches + inserted_bp + deleted_bp) as f64)
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string();
-        new_tags.push(("md:f".to_string(), md_value));
+            
+        // Create a map for new tag values
+        let mut new_tag_values = HashMap::new();
+        for (tag, value) in &current.tags {
+            if !matches!(tag.as_str(), "gi:f" | "bi:f" | "cg:Z" | "md:f") {
+                new_tag_values.insert(tag.as_str(), value.clone());
+            }
+        }
+        
+        // Update with new values
+        new_tag_values.insert("gi:f", gi_str);
+        new_tag_values.insert("bi:f", bi_str);
+        new_tag_values.insert("cg:Z", merged_cigar.clone());
+        new_tag_values.insert("md:f", md_value);
+        
+        // Create ordered tags vector preserving original order
+        let mut new_tags = Vec::new();
+        
+        // First add any tags in their original order
+        for (tag, _) in &current.tags {
+            if let Some(value) = new_tag_values.get(tag.as_str()) {
+                new_tags.push((tag.clone(), value.clone()));
+                new_tag_values.remove(tag.as_str());
+            }
+        }
+        
+        // Add any remaining tags (should be none if properly preserved)
+        for (tag, value) in new_tag_values {
+            new_tags.push((tag.to_string(), value));
+        }
         
         // Update the merged entry with computed coordinates
         merged_entry = PafEntry {
