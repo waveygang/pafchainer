@@ -699,20 +699,31 @@ fn process_chain(
                   computed_target_end, next.target_end);
         }
         
-        // Create new tags
-        let mut new_tags = Vec::new();
-        for (tag, value) in &current.tags {
-            if !matches!(tag.as_str(), "cg:Z" | "chain:i") {
-                new_tags.push((tag.clone(), value.clone()));
+        // Create a map for new tag values
+        let mut new_tag_values = HashMap::new();
+        for (tag, _) in &current.tags {
+            if matches!(tag.as_str(), "cg:Z" | "chain:i") {
+                // For tags we know we'll update, store their new values
+                if tag == "cg:Z" {
+                    new_tag_values.insert(tag.clone(), merged_cigar.clone());
+                } else if tag == "chain:i" {
+                    let chain_tag_value = format!("{}.1.1", current.chain_id);
+                    new_tag_values.insert(tag.clone(), chain_tag_value);
+                }
             }
         }
         
-        // Update CIGAR tag
-        new_tags.push(("cg:Z".to_string(), merged_cigar.clone()));
-        
-        // Update chain tag
-        let chain_tag_value = format!("{}.1.1", current.chain_id);
-        new_tags.push(("chain:i".to_string(), chain_tag_value));
+        // Create new tags array preserving original order
+        let mut new_tags = Vec::with_capacity(current.tags.len());
+        for (tag, value) in &current.tags {
+            if let Some(new_value) = new_tag_values.get(tag) {
+                // Use the new value for tags that need updating
+                new_tags.push((tag.clone(), new_value.clone()));
+            } else {
+                // Keep the original value for other tags
+                new_tags.push((tag.clone(), value.clone()));
+            }
+        }
         
         // Update merged entry
         merged_entry = PafEntry {
