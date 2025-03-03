@@ -4,6 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::error::Error;
 use clap::Parser;
+use log::{info, warn};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, AlignmentStatus};
 use rust_htslib::faidx::Reader as FastaReader;
 
@@ -33,6 +34,10 @@ struct Args {
     /// Number of threads to use
     #[clap(short, long, default_value = "4")]
     threads: usize,
+
+    /// Verbosity level (0 = error, 1 = info, 2 = debug)
+    #[clap(short, long, default_value = "0")]
+    verbose: u8,
 }
 
 // PAF entry representation
@@ -216,7 +221,7 @@ fn cigar_to_string(ops: &[CigarOp]) -> String {
     ops.iter().map(|&CigarOp(op, count)| format!("{}{}", count, op)).collect()
 }
 
-// Erode CIGAR from the end
+    // Erode CIGAR from the end
 fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
     let ops = parse_cigar(cigar)?;
     let mut new_ops = Vec::new();
@@ -224,12 +229,16 @@ fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize
     let mut query_bases_removed = 0;
     let mut target_bases_removed = 0;
     
+    info!("Eroding {} base pairs from end of CIGAR", bp_count);
+    
     // Copy operations from beginning until we need to erode
     let mut i = 0;
     while i < ops.len() && remaining_bp > 0 {
         // Process operations from the end
         let idx = ops.len() - 1 - i;
         let CigarOp(op, count) = ops[idx];
+        
+        info!("erode_cigar_end - Processing operation: {}{}", count, op);
         
         match op {
             '=' | 'X' | 'M' => {
@@ -277,7 +286,7 @@ fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize
     Ok((cigar_to_string(&new_ops), query_bases_removed, target_bases_removed))
 }
 
-// Erode CIGAR from the start
+    // Erode CIGAR from the start
 fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
     let ops = parse_cigar(cigar)?;
     let mut new_ops = Vec::new();
@@ -285,10 +294,14 @@ fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usi
     let mut query_bases_removed = 0;
     let mut target_bases_removed = 0;
     
+    info!("Eroding {} base pairs from start of CIGAR", bp_count);
+    
     // Skip or partially include first operations until eroded enough
     let mut i = 0;
     while i < ops.len() && remaining_bp > 0 {
         let CigarOp(op, count) = ops[i];
+        
+        info!("erode_cigar_start - Processing operation: {}{}", count, op);
         
         match op {
             '=' | 'X' | 'M' => {
@@ -380,6 +393,8 @@ fn cigar_u8_to_ops(cigar: &[u8]) -> Vec<(usize, char)> {
 
 // Align two sequences using WFA
 fn align_sequences_wfa(query: &[u8], target: &[u8]) -> Result<String, Box<dyn Error>> {
+    info!("Performing WFA alignment between sequences of lengths {} and {}", query.len(), target.len());
+    
     // Initialize WFA aligner with gap-affine penalties
     let match_score = 0;
     let mismatch = 3;
@@ -397,8 +412,13 @@ fn align_sequences_wfa(query: &[u8], target: &[u8]) -> Result<String, Box<dyn Er
     
     // Check alignment status (can't use != since AlignmentStatus doesn't implement PartialEq)
     match status {
-        AlignmentStatus::Completed => {},
-        _ => return Err(format!("Alignment failed with status: {:?}", status).into()),
+        AlignmentStatus::Completed => {
+            info!("WFA alignment completed successfully");
+        },
+        s => {
+            warn!("Alignment failed with status: {:?}", s);
+            return Err(format!("Alignment failed with status: {:?}", s).into());
+        }
     }
     
     // Convert CIGAR to string
@@ -537,8 +557,11 @@ fn process_chain(
 ) -> Result<Vec<PafEntry>, Box<dyn Error>> {
     if chain.len() <= 1 {
         // If only one entry, return it unchanged
+        info!("Chain has only one entry, returning unchanged");
         return Ok(chain.to_vec());
     }
+    
+    info!("Processing chain with {} entries", chain.len());
     
     // Sort chain by position
     let mut sorted_chain = chain.to_vec();
@@ -549,6 +572,8 @@ fn process_chain(
     
     // Process each pair of adjacent entries
     for i in 0..(sorted_chain.len() - 1) {
+        info!("Processing chain pair {}/{}", i+1, sorted_chain.len()-1);
+        
         // Get the current merged entry and the next entry to merge
         let current = if i == 0 { sorted_chain[0].clone() } else { merged_entry };
         let next = &sorted_chain[i+1];
@@ -605,26 +630,32 @@ fn process_chain(
             next.target_start - current.target_end
         } else { 0 };
         
+        info!("Query gap: {}, Target gap: {}", query_gap, target_gap);
+        
         // Get gap sequences if needed
         let mut gap_query_seq = Vec::new();
         let mut gap_target_seq = Vec::new();
         
         if query_gap > 0 {
+            info!("Getting gap query sequence of length {}", query_gap);
             gap_query_seq = query_db.get_subsequence(
                 &current.query_name,
                 current.query_end,
                 next.query_start,
                 current.strand == '-'
             )?;
+            info!("Got gap query sequence of length {}", gap_query_seq.len());
         }
         
         if target_gap > 0 {
+            info!("Getting gap target sequence of length {}", target_gap);
             gap_target_seq = target_db.get_subsequence(
                 &current.target_name,
                 current.target_end,
                 next.target_start,
                 false
             )?;
+            info!("Got gap target sequence of length {}", gap_target_seq.len());
         }
         
         // Combine sequences
@@ -642,6 +673,8 @@ fn process_chain(
         }
         full_target.extend_from_slice(&next_target_seq);
         
+        info!("Combined sequence lengths - Query: {}, Target: {}", full_query.len(), full_target.len());
+        
         // Perform WFA alignment on combined sequences
         let combined_cigar = align_sequences_wfa(&full_query, &full_target)?;
         
@@ -655,6 +688,16 @@ fn process_chain(
         // Compute coordinates
         let (computed_query_end, computed_target_end) = 
             compute_coordinates(current.query_start, current.target_start, &merged_cigar)?;
+            
+        // Check for coordinate mismatches
+        if computed_query_end != next.query_end {
+            warn!("Query end coordinate mismatch: computed {} vs expected {} (from next entry)",
+                  computed_query_end, next.query_end);
+        }
+        if computed_target_end != next.target_end {
+            warn!("Target end coordinate mismatch: computed {} vs expected {} (from next entry)",
+                  computed_target_end, next.target_end);
+        }
         
         // Create new tags
         let mut new_tags = Vec::new();
@@ -712,6 +755,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
     let args = Args::parse();
     
+    // Initialize logging
+    env_logger::Builder::new()
+        .filter_level(match args.verbose {
+            0 => log::LevelFilter::Warn,    // Errors and warnings
+            1 => log::LevelFilter::Info,    // Errors, warnings, and info
+            _ => log::LevelFilter::Debug,   // Errors, warnings, info, and debug
+        })
+        .init();
+    
     // Set number of threads if needed
     if args.threads > 1 {
         rayon::ThreadPoolBuilder::new()
@@ -720,26 +772,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     
     // Load sequence databases
-    println!("Loading query sequences...");
+    info!("Loading query sequences from {}...", args.query.display());
     let query_db = SequenceDB::new(&args.query)?;
     
-    println!("Loading target sequences...");
+    info!("Loading target sequences from {}...", args.target.display());
     let target_db = SequenceDB::new(&args.target)?;
     
     // Read and process PAF file
-    println!("Reading PAF file...");
+    info!("Reading PAF file {}...", args.paf.display());
     let entries = read_paf_file(&args.paf)?;
-    println!("Read {} PAF entries", entries.len());
+    info!("Read {} PAF entries", entries.len());
     
     // Group entries by chain
     let chain_groups = group_by_chain(entries);
-    println!("Found {} chains", chain_groups.len());
+    info!("Found {} chains", chain_groups.len());
     
     // Process each chain
     let mut processed_entries = Vec::new();
     
     for (chain_id, group) in chain_groups {
-        println!("Processing chain {} with {} entries", chain_id, group.len());
+        info!("Processing chain {} with {} entries", chain_id, group.len());
+        
+        // Verify CIGAR strings before processing
+        info!("Verifying chain {}", chain_id);
         
         // Process chain and add results
         let chain_result = process_chain(&group, &query_db, &target_db, args.erosion_size)?;
@@ -748,9 +803,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     // Write output
     let output_path = args.output.unwrap_or_else(|| PathBuf::from("output.paf"));
-    println!("Writing {} processed entries to {}", processed_entries.len(), output_path.display());
+    info!("Writing {} processed entries to {}", processed_entries.len(), output_path.display());
     write_paf_file(&output_path, &processed_entries)?;
     
-    println!("Done!");
+    info!("Done!");
     Ok(())
 }
