@@ -88,6 +88,7 @@ impl SequenceDB {
             Ok(seq) => seq.into_bytes(),
             Err(e) => return Err(format!("Failed to fetch sequence for {}: {}", name, e).into()),
         };
+        info!("Fetched sequence for {} from {} to {}", name, start, end);
         
         if reverse_complement {
             // Reverse complement the sequence
@@ -578,72 +579,245 @@ fn process_chain(
         let current = if i == 0 { sorted_chain[0].clone() } else { merged_entry };
         let next = &sorted_chain[i+1];
         
-        // Erode CIGARs at boundaries
+        // Erode CIGARs at boundaries only if erosion_size > 0
         let (eroded_current_cigar, current_query_removed, current_target_removed) = 
-            erode_cigar_end(&current.cigar, erosion_size)?;
+            if erosion_size > 0 {
+                erode_cigar_end(&current.cigar, erosion_size)?
+            } else {
+                (current.cigar.clone(), 0, 0)
+            };
         
         let (eroded_next_cigar, next_query_removed, next_target_removed) = 
-            erode_cigar_start(&next.cigar, erosion_size)?;
+            if erosion_size > 0 {
+                erode_cigar_start(&next.cigar, erosion_size)?
+            } else {
+                (next.cigar.clone(), 0, 0)
+            };
         
-        // Calculate coordinates for sequence extraction
-        let current_query_extract_start = current.query_end - current_query_removed as u64;
-        let current_target_extract_start = current.target_end - current_target_removed as u64;
+        // Check for gaps and calculate gap coordinates
+        let query_gap_start = if erosion_size > 0 {
+            current.query_end - current_query_removed as u64
+        } else {
+            current.query_end
+        };
         
-        let next_query_extract_end = next.query_start + next_query_removed as u64;
-        let next_target_extract_end = next.target_start + next_target_removed as u64;
+        let query_gap_end = if erosion_size > 0 {
+            next.query_start + next_query_removed as u64
+        } else {
+            next.query_start
+        };
         
-        // Get sequences for boundary regions
-        let current_query_seq = query_db.get_subsequence(
-            &current.query_name,
-            current_query_extract_start,
-            current.query_end,
-            current.strand == '-'
-        )?;
+        let target_gap_start = if erosion_size > 0 {
+            current.target_end - current_target_removed as u64
+        } else {
+            current.target_end
+        };
         
-        let next_query_seq = query_db.get_subsequence(
-            &next.query_name,
-            next.query_start,
-            next_query_extract_end,
-            next.strand == '-'
-        )?;
+        let target_gap_end = if erosion_size > 0 {
+            next.target_start + next_target_removed as u64
+        } else {
+            next.target_start
+        };
         
-        let current_target_seq = target_db.get_subsequence(
-            &current.target_name,
-            current_target_extract_start,
-            current.target_end,
-            false
-        )?;
-        
-        let next_target_seq = target_db.get_subsequence(
-            &next.target_name,
-            next.target_start,
-            next_target_extract_end,
-            false
-        )?;
-        
-        // Check for gaps and get gap sequences if needed
-        let query_gap = if next.query_start > current.query_end {
-            next.query_start - current.query_end
+        // Calculate gap sizes
+        let query_gap = if query_gap_end > query_gap_start {
+            query_gap_end - query_gap_start
         } else { 0 };
         
-        let target_gap = if next.target_start > current.target_end {
-            next.target_start - current.target_end
+        let target_gap = if target_gap_end > target_gap_start {
+            target_gap_end - target_gap_start
         } else { 0 };
         
         info!("Query gap: {}, Target gap: {}", query_gap, target_gap);
         
-        // Get gap sequences if needed
+        // Special handling for no gaps
+        if query_gap == 0 && target_gap == 0 && erosion_size == 0 {
+            // If no gaps and no erosion, just merge the CIGAR strings directly
+            info!("No erosion and no gaps, directly merging CIGAR strings");
+            let merged_cigar = merge_cigars(&[&current.cigar, &next.cigar])?;
+            
+            // Calculate statistics from merged CIGAR
+            let (matches, _mismatches, _insertions, _inserted_bp, _deletions, _deleted_bp, block_len) = 
+                calculate_cigar_stats(&merged_cigar)?;
+            
+            // Create a map for new tag values
+            let mut new_tag_values = HashMap::new();
+            for (tag, _) in &current.tags {
+                if matches!(tag.as_str(), "cg:Z" | "chain:i") {
+                    // For tags we know we'll update, store their new values
+                    if tag == "cg:Z" {
+                        new_tag_values.insert(tag.clone(), merged_cigar.clone());
+                    } else if tag == "chain:i" {
+                        let chain_tag_value = format!("{}.1.1", current.chain_id);
+                        new_tag_values.insert(tag.clone(), chain_tag_value);
+                    }
+                }
+            }
+            
+            // Create new tags array preserving original order
+            let mut new_tags = Vec::with_capacity(current.tags.len());
+            for (tag, value) in &current.tags {
+                if let Some(new_value) = new_tag_values.get(tag) {
+                    // Use the new value for tags that need updating
+                    new_tags.push((tag.clone(), new_value.clone()));
+                } else {
+                    // Keep the original value for other tags
+                    new_tags.push((tag.clone(), value.clone()));
+                }
+            }
+            
+            // Create merged entry with updated CIGAR and end coordinates
+            merged_entry = PafEntry {
+                query_name: current.query_name,
+                query_length: current.query_length,
+                query_start: current.query_start,
+                query_end: next.query_end,
+                strand: current.strand,
+                target_name: current.target_name,
+                target_length: current.target_length,
+                target_start: current.target_start,
+                target_end: next.target_end,
+                num_matches: matches,
+                alignment_length: block_len,
+                mapping_quality: current.mapping_quality,
+                tags: new_tags,
+                chain_id: current.chain_id,
+                chain_length: 1,
+                chain_pos: 1,
+                cigar: merged_cigar,
+            };
+            
+            continue;
+        } else if query_gap > 0 && target_gap == 0 && erosion_size == 0 {
+            // If gap in query only and no erosion, add insertions to the CIGAR
+            info!("No erosion with query gap only, adding insertions to CIGAR");
+            let insertion_cigar = format!("{}I", query_gap);
+            let merged_cigar = merge_cigars(&[&current.cigar, &insertion_cigar, &next.cigar])?;
+            
+            // Calculate statistics from merged CIGAR
+            let (matches, _mismatches, _insertions, _inserted_bp, _deletions, _deleted_bp, block_len) = 
+                calculate_cigar_stats(&merged_cigar)?;
+            
+            // Create merged entry with insertion CIGAR
+            let mut new_tag_values = HashMap::new();
+            for (tag, _) in &current.tags {
+                if matches!(tag.as_str(), "cg:Z" | "chain:i") {
+                    // For tags we know we'll update, store their new values
+                    if tag == "cg:Z" {
+                        new_tag_values.insert(tag.clone(), merged_cigar.clone());
+                    } else if tag == "chain:i" {
+                        let chain_tag_value = format!("{}.1.1", current.chain_id);
+                        new_tag_values.insert(tag.clone(), chain_tag_value);
+                    }
+                }
+            }
+            
+            // Create new tags array preserving original order
+            let mut new_tags = Vec::with_capacity(current.tags.len());
+            for (tag, value) in &current.tags {
+                if let Some(new_value) = new_tag_values.get(tag) {
+                    // Use the new value for tags that need updating
+                    new_tags.push((tag.clone(), new_value.clone()));
+                } else {
+                    // Keep the original value for other tags
+                    new_tags.push((tag.clone(), value.clone()));
+                }
+            }
+            
+            merged_entry = PafEntry {
+                query_name: current.query_name,
+                query_length: current.query_length,
+                query_start: current.query_start,
+                query_end: next.query_end,
+                strand: current.strand,
+                target_name: current.target_name,
+                target_length: current.target_length,
+                target_start: current.target_start,
+                target_end: next.target_end,
+                num_matches: matches,
+                alignment_length: block_len,
+                mapping_quality: current.mapping_quality,
+                tags: new_tags,
+                chain_id: current.chain_id,
+                chain_length: 1,
+                chain_pos: 1,
+                cigar: merged_cigar,
+            };
+            
+            continue;
+        } else if query_gap == 0 && target_gap > 0 && erosion_size == 0 {
+            // If gap in target only and no erosion, add deletions to the CIGAR
+            info!("No erosion with target gap only, adding deletions to CIGAR");
+            let deletion_cigar = format!("{}D", target_gap);
+            let merged_cigar = merge_cigars(&[&current.cigar, &deletion_cigar, &next.cigar])?;
+            
+            // Calculate statistics from merged CIGAR
+            let (matches, _mismatches, _insertions, _inserted_bp, _deletions, _deleted_bp, block_len) = 
+                calculate_cigar_stats(&merged_cigar)?;
+            
+            // Create merged entry with deletion CIGAR
+            let mut new_tag_values = HashMap::new();
+            for (tag, _) in &current.tags {
+                if matches!(tag.as_str(), "cg:Z" | "chain:i") {
+                    // For tags we know we'll update, store their new values
+                    if tag == "cg:Z" {
+                        new_tag_values.insert(tag.clone(), merged_cigar.clone());
+                    } else if tag == "chain:i" {
+                        let chain_tag_value = format!("{}.1.1", current.chain_id);
+                        new_tag_values.insert(tag.clone(), chain_tag_value);
+                    }
+                }
+            }
+            
+            // Create new tags array preserving original order
+            let mut new_tags = Vec::with_capacity(current.tags.len());
+            for (tag, value) in &current.tags {
+                if let Some(new_value) = new_tag_values.get(tag) {
+                    // Use the new value for tags that need updating
+                    new_tags.push((tag.clone(), new_value.clone()));
+                } else {
+                    // Keep the original value for other tags
+                    new_tags.push((tag.clone(), value.clone()));
+                }
+            }
+            
+            merged_entry = PafEntry {
+                query_name: current.query_name,
+                query_length: current.query_length,
+                query_start: current.query_start,
+                query_end: next.query_end,
+                strand: current.strand,
+                target_name: current.target_name,
+                target_length: current.target_length,
+                target_start: current.target_start,
+                target_end: next.target_end,
+                num_matches: matches,
+                alignment_length: block_len,
+                mapping_quality: current.mapping_quality,
+                tags: new_tags,
+                chain_id: current.chain_id,
+                chain_length: 1,
+                chain_pos: 1,
+                cigar: merged_cigar,
+            };
+            
+            continue;
+        }
+        
+        // Handle gap alignment with or without erosion
         let mut gap_query_seq = Vec::new();
         let mut gap_target_seq = Vec::new();
         
+        // Get gap sequences directly from computed gap positions
         if query_gap > 0 {
             info!("Getting gap query sequence of length {}", query_gap);
             gap_query_seq = query_db.get_subsequence(
                 &current.query_name,
-                current.query_end,
-                next.query_start,
+                query_gap_start,
+                query_gap_end,
                 current.strand == '-'
             )?;
+            info!("Fetched sequence for {} from {} to {}", current.query_name, query_gap_start, query_gap_end);
             info!("Got gap query sequence of length {}", gap_query_seq.len());
         }
         
@@ -651,53 +825,25 @@ fn process_chain(
             info!("Getting gap target sequence of length {}", target_gap);
             gap_target_seq = target_db.get_subsequence(
                 &current.target_name,
-                current.target_end,
-                next.target_start,
+                target_gap_start,
+                target_gap_end,
                 false
             )?;
+            info!("Fetched sequence for {} from {} to {}", current.target_name, target_gap_start, target_gap_end);
             info!("Got gap target sequence of length {}", gap_target_seq.len());
         }
         
-        // Combine sequences
-        let mut full_query = Vec::new();
-        full_query.extend_from_slice(&current_query_seq);
-        if !gap_query_seq.is_empty() {
-            full_query.extend_from_slice(&gap_query_seq);
-        }
-        full_query.extend_from_slice(&next_query_seq);
+        info!("Combined sequence lengths - Query: {}, Target: {}", gap_query_seq.len(), gap_target_seq.len());
         
-        let mut full_target = Vec::new();
-        full_target.extend_from_slice(&current_target_seq);
-        if !gap_target_seq.is_empty() {
-            full_target.extend_from_slice(&gap_target_seq);
-        }
-        full_target.extend_from_slice(&next_target_seq);
-        
-        info!("Combined sequence lengths - Query: {}, Target: {}", full_query.len(), full_target.len());
-        
-        // Perform WFA alignment on combined sequences
-        let combined_cigar = align_sequences_wfa(&full_query, &full_target)?;
+        // Perform WFA alignment on gap sequences
+        let gap_cigar = align_sequences_wfa(&gap_query_seq, &gap_target_seq)?;
         
         // Merge CIGARs
-        let merged_cigar = merge_cigars(&[&eroded_current_cigar, &combined_cigar, &eroded_next_cigar])?;
+        let merged_cigar = merge_cigars(&[&eroded_current_cigar, &gap_cigar, &eroded_next_cigar])?;
         
         // Calculate statistics from merged CIGAR
         let (matches, _mismatches, _insertions, _inserted_bp, _deletions, _deleted_bp, block_len) = 
             calculate_cigar_stats(&merged_cigar)?;
-        
-        // Compute coordinates
-        let (computed_query_end, computed_target_end) = 
-            compute_coordinates(current.query_start, current.target_start, &merged_cigar)?;
-            
-        // Check for coordinate mismatches
-        if computed_query_end != next.query_end {
-            warn!("Query end coordinate mismatch: computed {} vs expected {} (from next entry)",
-                  computed_query_end, next.query_end);
-        }
-        if computed_target_end != next.target_end {
-            warn!("Target end coordinate mismatch: computed {} vs expected {} (from next entry)",
-                  computed_target_end, next.target_end);
-        }
         
         // Create a map for new tag values
         let mut new_tag_values = HashMap::new();
@@ -725,17 +871,17 @@ fn process_chain(
             }
         }
         
-        // Update merged entry
+        // Use the expected coordinates directly instead of computing them
         merged_entry = PafEntry {
             query_name: current.query_name,
             query_length: current.query_length,
             query_start: current.query_start,
-            query_end: computed_query_end,
+            query_end: next.query_end,  // Use the end position from the next entry directly
             strand: current.strand,
             target_name: current.target_name,
             target_length: current.target_length,
             target_start: current.target_start,
-            target_end: computed_target_end,
+            target_end: next.target_end,  // Use the end position from the next entry directly
             num_matches: matches,
             alignment_length: block_len,
             mapping_quality: 255,
