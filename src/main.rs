@@ -88,7 +88,6 @@ impl SequenceDB {
             Ok(seq) => seq.into_bytes(),
             Err(e) => return Err(format!("Failed to fetch sequence for {}: {}", name, e).into()),
         };
-        info!("Fetched sequence for {} from {} to {}", name, start, end);
         
         if reverse_complement {
             // Reverse complement the sequence
