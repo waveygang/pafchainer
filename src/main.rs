@@ -4,9 +4,10 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::error::Error;
 use clap::Parser;
-use log::{info, warn};
+use log::{info, warn, debug};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, AlignmentStatus};
 use rust_htslib::faidx::Reader as FastaReader;
+use libc;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about = "Process PAF files and connect chains using WFA2 alignment")]
@@ -84,18 +85,24 @@ impl SequenceDB {
         let start_usize = start as usize;
         let end_usize = std::cmp::min(end as usize, std::usize::MAX);
         
-        let seq = match self.reader.fetch_seq_string(name, start_usize, end_usize - 1) {
-            Ok(seq) => seq.into_bytes(),
+        // Fetch sequence and properly handle memory
+        let seq = match self.reader.fetch_seq(name, start_usize, end_usize - 1) {
+            Ok(seq) => {
+                let mut seq_vec = seq.to_vec();
+                unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory to avoid memory leak (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                seq_vec
+            },
             Err(e) => return Err(format!("Failed to fetch sequence for {}: {}", name, e).into()),
         };
         
         if reverse_complement {
             // Reverse complement the sequence
             Ok(seq.iter().rev().map(|&b| match b {
-                b'A' | b'a' => b'T',
-                b'T' | b't' => b'A',
-                b'G' | b'g' => b'C',
-                b'C' | b'c' => b'G',
+                b'A' => b'T',
+                b'T' => b'A',
+                b'G' => b'C',
+                b'C' => b'G',
                 x => x,
             }).collect())
         } else {
@@ -140,14 +147,14 @@ impl PafEntry {
                 let tag_value = tag_parts[2..].join(":");
                 
                 // Parse chain information
-                if tag_name == "chain:i" {
+                if tag_name == "ch:Z" {
                     let chain_parts: Vec<&str> = tag_value.split('.').collect();
                     if chain_parts.len() >= 3 {
                         entry.chain_id = chain_parts[0].parse()?;
                         entry.chain_length = chain_parts[1].parse()?;
                         entry.chain_pos = chain_parts[2].parse()?;
                     } else {
-                        return Err(format!("Invalid chain:i tag format: {}", tag_value).into());
+                        return Err(format!("Invalid ch:Z tag format: {}", tag_value).into());
                     }
                 }
                 
@@ -162,7 +169,7 @@ impl PafEntry {
 
         // Verify required tags
         if entry.chain_id == 0 || entry.cigar.is_empty() {
-            return Err("Missing required 'chain:i' or 'cg:Z' tag".into());
+            return Err("Missing required 'ch:Z' or 'cg:Z' tag".into());
         }
 
         Ok(entry)
@@ -196,7 +203,7 @@ impl PafEntry {
 }
 
 // Parse CIGAR string into operations
-fn parse_cigar(cigar: &str) -> Result<Vec<CigarOp>, Box<dyn Error>> {
+fn cigar_to_ops(cigar: &str) -> Result<Vec<CigarOp>, Box<dyn Error>> {
     let mut ops = Vec::new();
     let mut count = 0;
     
@@ -214,142 +221,6 @@ fn parse_cigar(cigar: &str) -> Result<Vec<CigarOp>, Box<dyn Error>> {
     }
     
     Ok(ops)
-}
-
-// Convert CIGAR operations to string
-fn cigar_to_string(ops: &[CigarOp]) -> String {
-    ops.iter().map(|&CigarOp(op, count)| format!("{}{}", count, op)).collect()
-}
-
-// Erode CIGAR from the end
-fn erode_cigar_end(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
-    let ops = parse_cigar(cigar)?;
-    let mut new_ops = Vec::new();
-    let mut remaining_bp = bp_count;
-    let mut query_bases_removed = 0;
-    let mut target_bases_removed = 0;
-    
-    info!("Eroding {} base pairs from end of CIGAR", bp_count);
-    
-    // Copy operations from beginning until we need to erode
-    let mut i = 0;
-    while i < ops.len() && remaining_bp > 0 {
-        // Process operations from the end
-        let idx = ops.len() - 1 - i;
-        let CigarOp(op, count) = ops[idx];
-        
-        info!("erode_cigar_end - Processing operation: {}{}", count, op);
-        
-        match op {
-            '=' | 'X' | 'M' => {
-                // Advances both sequences
-                if count > remaining_bp {
-                    // Partial erosion
-                    new_ops.insert(0, CigarOp(op, count - remaining_bp));
-                    query_bases_removed += remaining_bp;
-                    target_bases_removed += remaining_bp;
-                    remaining_bp = 0;
-                } else {
-                    // Complete erosion
-                    query_bases_removed += count;
-                    target_bases_removed += count;
-                    remaining_bp -= count;
-                }
-            },
-            'I' => {
-                // Insertion only advances query
-                query_bases_removed += count;
-                // Skip this operation if still eroding
-                if remaining_bp == 0 {
-                    new_ops.insert(0, CigarOp(op, count));
-                }
-            },
-            'D' => {
-                // Deletion only advances target
-                target_bases_removed += count;
-                // Skip this operation if still eroding
-                if remaining_bp == 0 {
-                    new_ops.insert(0, CigarOp(op, count));
-                }
-            },
-            _ => new_ops.insert(0, CigarOp(op, count)), // Keep other operations
-        }
-        
-        i += 1;
-
-        info!("\terode_cigar_end - Eroded from query: {}, target: {}", query_bases_removed, target_bases_removed);
-    }
-    
-    // Add remaining operations
-    for j in 0..(ops.len() - i) {
-        new_ops.insert(j, ops[j]);
-    }
-    
-    Ok((cigar_to_string(&new_ops), query_bases_removed, target_bases_removed))
-}
-
-// Erode CIGAR from the start
-fn erode_cigar_start(cigar: &str, bp_count: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
-    let ops = parse_cigar(cigar)?;
-    let mut new_ops = Vec::new();
-    let mut remaining_bp = bp_count;
-    let mut query_bases_removed = 0;
-    let mut target_bases_removed = 0;
-    
-    info!("Eroding {} base pairs from start of CIGAR", bp_count);
-    
-    // Skip or partially include first operations until eroded enough
-    let mut i = 0;
-    while i < ops.len() && remaining_bp > 0 {
-        let CigarOp(op, count) = ops[i];
-        
-        info!("erode_cigar_start - Processing operation: {}{}", count, op);
-        
-        match op {
-            '=' | 'X' | 'M' => {
-                // Advances both sequences
-                if count > remaining_bp {
-                    // Partial erosion
-                    new_ops.push(CigarOp(op, count - remaining_bp));
-                    query_bases_removed += remaining_bp;
-                    target_bases_removed += remaining_bp;
-                    remaining_bp = 0;
-                } else {
-                    // Complete erosion
-                    query_bases_removed += count;
-                    target_bases_removed += count;
-                    remaining_bp -= count;
-                }
-            },
-            'I' => {
-                // Insertion only advances query
-                query_bases_removed += count;
-                // Skip this operation if still eroding
-                if remaining_bp == 0 {
-                    new_ops.push(CigarOp(op, count));
-                }
-            },
-            'D' => {
-                // Deletion only advances target
-                target_bases_removed += count;
-                // Skip this operation if still eroding
-                if remaining_bp == 0 {
-                    new_ops.push(CigarOp(op, count));
-                }
-            },
-            _ => new_ops.push(CigarOp(op, count)), // Keep other operations
-        }
-        
-        i += 1;
-    }
-    
-    // Add all remaining operations
-    while i < ops.len() {
-        new_ops.push(ops[i]);
-        i += 1;
-    }
-    
-    Ok((cigar_to_string(&new_ops), query_bases_removed, target_bases_removed))
 }
 
 // Convert WFA alignment CIGAR to standard operations
@@ -393,9 +264,197 @@ fn cigar_u8_to_ops(cigar: &[u8]) -> Vec<(usize, char)> {
     ops
 }
 
+// Convert CIGAR operations to string
+fn ops_to_cigar(ops: &[CigarOp]) -> String {
+    ops.iter().map(|&CigarOp(op, count)| format!("{}{}", count, op)).collect()
+}
+
+// Erode CIGAR from the end with separate query and target erosion limits
+fn erode_cigar_end(cigar: &str, query_bp_limit: usize, target_bp_limit: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
+    let ops = cigar_to_ops(cigar)?;
+    let mut new_ops = Vec::new();
+    let mut remaining_query_bp = query_bp_limit;
+    let mut remaining_target_bp = target_bp_limit;
+    let mut query_bases_removed = 0;
+    let mut target_bases_removed = 0;
+    
+    debug!("\tEroding from end of CIGAR - Query limit: {} bp, Target limit: {} bp", 
+          query_bp_limit, target_bp_limit);
+    
+    // Copy operations from beginning until we need to erode
+    let mut i = 0;
+    while i < ops.len() && (remaining_query_bp > 0 || remaining_target_bp > 0) {
+        // Process operations from the end
+        let idx = ops.len() - 1 - i;
+        let CigarOp(op, count) = ops[idx];
+        
+        // debug!("\t\terode_cigar_end - Processing operation: {}{}", count, op);
+        
+        match op {
+            '=' | 'X' | 'M' => {
+                // Advances both sequences
+                if remaining_query_bp > 0 || remaining_target_bp > 0 {
+                    let query_erosion = std::cmp::min(count, remaining_query_bp);
+                    let target_erosion = std::cmp::min(count, remaining_target_bp);
+                    
+                    // Determine actual erosion
+                    let actual_erosion = std::cmp::max(query_erosion, target_erosion);
+                    
+                    if actual_erosion < count {
+                        // Partial erosion
+                        new_ops.insert(0, CigarOp(op, count - actual_erosion));
+                    }
+                    
+                    query_bases_removed += actual_erosion;
+                    target_bases_removed += actual_erosion;
+                    remaining_query_bp = remaining_query_bp.saturating_sub(actual_erosion);
+                    remaining_target_bp = remaining_target_bp.saturating_sub(actual_erosion);
+                } else {
+                    // No more erosion needed
+                    new_ops.insert(0, CigarOp(op, count));
+                }
+            },
+            'I' => {
+                // Insertion only advances query
+                if remaining_query_bp > 0 {
+                    let actual_erosion = count;
+                    
+                    query_bases_removed += actual_erosion;
+                    remaining_query_bp = remaining_query_bp.saturating_sub(actual_erosion);
+                } else {
+                    // No more query erosion needed
+                    new_ops.insert(0, CigarOp(op, count));
+                }
+            },
+            'D' => {
+                // Deletion only advances target
+                if remaining_target_bp > 0 {
+                    let actual_erosion = count;
+
+                    target_bases_removed += actual_erosion;
+                    remaining_target_bp = remaining_target_bp.saturating_sub(actual_erosion);
+                } else {
+                    // No more target erosion needed
+                    new_ops.insert(0, CigarOp(op, count));
+                }
+            },
+            _ => new_ops.insert(0, CigarOp(op, count)), // Keep other operations
+        }
+        
+        i += 1;
+        
+        // debug!("\t\tProgress - Eroded from query: {}/{}, target: {}/{}", 
+        //       query_bases_removed, query_bp_limit, 
+        //       target_bases_removed, target_bp_limit);
+    }
+    
+    // Add remaining operations
+    for j in 0..(ops.len() - i) {
+        new_ops.insert(j, ops[j]);
+    }
+    
+    Ok((ops_to_cigar(&new_ops), query_bases_removed, target_bases_removed))
+}
+
+// Erode CIGAR from the start with separate query and target erosion limits
+fn erode_cigar_start(cigar: &str, query_bp_limit: usize, target_bp_limit: usize) -> Result<(String, usize, usize), Box<dyn Error>> {
+    let ops = cigar_to_ops(cigar)?;
+    let mut new_ops = Vec::new();
+    let mut remaining_query_bp = query_bp_limit;
+    let mut remaining_target_bp = target_bp_limit;
+    let mut query_bases_removed = 0;
+    let mut target_bases_removed = 0;
+    
+    debug!("\tEroding from start of CIGAR - Query limit: {} bp, Target limit: {} bp", 
+          query_bp_limit, target_bp_limit);
+    
+    // Skip or partially include first operations until eroded enough
+    let mut i = 0;
+    while i < ops.len() && (remaining_query_bp > 0 || remaining_target_bp > 0) {
+        let CigarOp(op, count) = ops[i];
+        
+        // debug!("\t\terode_cigar_start - Processing operation: {}{}", count, op);
+        
+        match op {
+            '=' | 'X' | 'M' => {
+                // Advances both sequences
+                if remaining_query_bp > 0 || remaining_target_bp > 0 {
+                    let query_erosion = std::cmp::min(count, remaining_query_bp);
+                    let target_erosion = std::cmp::min(count, remaining_target_bp);
+                    
+                    // Determine actual erosion
+                    let actual_erosion = std::cmp::max(query_erosion, target_erosion);
+
+                    if actual_erosion < count {
+                        // Partial erosion
+                        new_ops.push(CigarOp(op, count - actual_erosion));
+                    }
+                    
+                    query_bases_removed += actual_erosion;
+                    target_bases_removed += actual_erosion;
+                    remaining_query_bp = remaining_query_bp.saturating_sub(actual_erosion);
+                    remaining_target_bp = remaining_target_bp.saturating_sub(actual_erosion);
+                } else {
+                    // No more erosion needed
+                    new_ops.push(CigarOp(op, count));
+                }
+            },
+            'I' => {
+                // Insertion only advances query
+                if remaining_query_bp > 0 {
+                    let actual_erosion = std::cmp::min(count, remaining_query_bp);
+                    
+                    if actual_erosion < count {
+                        // Partial erosion
+                        new_ops.push(CigarOp(op, count - actual_erosion));
+                    }
+                    
+                    query_bases_removed += actual_erosion;
+                    remaining_query_bp = remaining_query_bp.saturating_sub(actual_erosion);
+                } else {
+                    // No more query erosion needed
+                    new_ops.push(CigarOp(op, count));
+                }
+            },
+            'D' => {
+                // Deletion only advances target
+                if remaining_target_bp > 0 {
+                    let actual_erosion = std::cmp::min(count, remaining_target_bp);
+                    
+                    if actual_erosion < count {
+                        // Partial erosion
+                        new_ops.push(CigarOp(op, count - actual_erosion));
+                    }
+                    
+                    target_bases_removed += actual_erosion;
+                    remaining_target_bp = remaining_target_bp.saturating_sub(actual_erosion);
+                } else {
+                    // No more target erosion needed
+                    new_ops.push(CigarOp(op, count));
+                }
+            },
+            _ => new_ops.push(CigarOp(op, count)), // Keep other operations
+        }
+        
+        i += 1;
+        
+        // debug!("\t\tProgress - Eroded from query: {}/{}, target: {}/{}", 
+        //       query_bases_removed, query_bp_limit, 
+        //       target_bases_removed, target_bp_limit);
+    }
+    
+    // Add all remaining operations
+    while i < ops.len() {
+        new_ops.push(ops[i]);
+        i += 1;
+    }
+    
+    Ok((ops_to_cigar(&new_ops), query_bases_removed, target_bases_removed))
+}
+
 // Align two sequences using WFA
 fn align_sequences_wfa(query: &[u8], target: &[u8]) -> Result<String, Box<dyn Error>> {
-    info!("Performing WFA alignment between sequences of lengths {} and {}", query.len(), target.len());
+    debug!("Performing WFA alignment between sequences of lengths {} and {}", query.len(), target.len());
     
     // Initialize WFA aligner with gap-affine penalties
     let match_score = 0;
@@ -415,7 +474,7 @@ fn align_sequences_wfa(query: &[u8], target: &[u8]) -> Result<String, Box<dyn Er
     // Check alignment status (can't use != since AlignmentStatus doesn't implement PartialEq)
     match status {
         AlignmentStatus::Completed => {
-            info!("WFA alignment completed successfully");
+            debug!("WFA alignment completed successfully");
         },
         s => {
             warn!("Alignment failed with status: {:?}", s);
@@ -438,7 +497,7 @@ fn merge_cigars(cigars: &[&str]) -> Result<String, Box<dyn Error>> {
     
     // Collect all operations
     for &cigar in cigars {
-        let ops = parse_cigar(cigar)?;
+        let ops = cigar_to_ops(cigar)?;
         all_ops.extend_from_slice(&ops);
     }
     
@@ -463,51 +522,12 @@ fn merge_cigars(cigars: &[&str]) -> Result<String, Box<dyn Error>> {
         optimized_ops.push(op);
     }
     
-    Ok(cigar_to_string(&optimized_ops))
-}
-
-// Compute coordinates based on CIGAR string
-fn compute_coordinates(
-    query_start: u64,
-    target_start: u64,
-    cigar: &str
-) -> Result<(u64, u64), Box<dyn Error>> {
-    let cigar_ops = parse_cigar(cigar)?;
-    
-    let mut query_advance = 0u64;
-    let mut target_advance = 0u64;
-    
-    // Calculate advancement based on CIGAR
-    for &CigarOp(op, len) in &cigar_ops {
-        let len = len as u64;
-        match op {
-            '=' | 'X' | 'M' => {
-                // Advances both sequences
-                query_advance += len;
-                target_advance += len;
-            },
-            'I' => {
-                // Insertion advances only query
-                query_advance += len;
-            },
-            'D' => {
-                // Deletion advances only target
-                target_advance += len;
-            },
-            _ => {} // Other operations don't advance
-        }
-    }
-    
-    // Compute end coordinates
-    let query_end = query_start + query_advance;
-    let target_end = target_start + target_advance;
-    
-    Ok((query_end, target_end))
+    Ok(ops_to_cigar(&optimized_ops))
 }
 
 // Calculate CIGAR statistics
 fn calculate_cigar_stats(cigar: &str) -> Result<(u64, u64, u64, u64, u64, u64, u64), Box<dyn Error>> {
-    let ops = parse_cigar(cigar)?;
+    let ops = cigar_to_ops(cigar)?;
     let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = 
         ops.iter().fold((0, 0, 0, 0, 0, 0, 0), |(m, mm, i, i_bp, d, d_bp, bl), &CigarOp(op, len)| {
             let len = len as u64;
@@ -539,6 +559,18 @@ fn read_paf_file<P: AsRef<Path>>(path: P) -> Result<Vec<PafEntry>, Box<dyn Error
     Ok(entries)
 }
 
+// Write PAF entries to file
+fn write_paf_file<P: AsRef<Path>>(path: P, entries: &[PafEntry]) -> Result<(), Box<dyn Error>> {
+    let file = File::create(path)?;
+    let mut writer = io::BufWriter::new(file);
+    
+    for entry in entries {
+        writeln!(writer, "{}", entry.to_string())?;
+    }
+    
+    Ok(())
+}
+
 // Group entries by chain_id
 fn group_by_chain(entries: Vec<PafEntry>) -> HashMap<u64, Vec<PafEntry>> {
     let mut chain_groups = HashMap::new();
@@ -556,7 +588,7 @@ fn update_tags(tags: &[(String, String)], cigar: &str, chain_id: u64) -> Vec<(St
     for (tag, value) in tags {
         if tag == "cg:Z" {
             new_tags.push((tag.clone(), cigar.to_string()));
-        } else if tag == "chain:i" {
+        } else if tag == "ch:Z" {
             new_tags.push((tag.clone(), format!("{}.1.1", chain_id)));
         } else {
             new_tags.push((tag.clone(), value.clone()));
@@ -569,24 +601,30 @@ fn update_tags(tags: &[(String, String)], cigar: &str, chain_id: u64) -> Vec<(St
 fn create_merged_entry(
     base_entry: &PafEntry,
     next_entry: &PafEntry,
-    merged_cigar: &str,
-    query_end: u64,
-    target_end: u64
+    merged_cigar: &str
 ) -> PafEntry {
     // Calculate statistics from merged CIGAR
     let (matches, _, _, _, _, _, block_len) = calculate_cigar_stats(merged_cigar)
         .expect("Failed to calculate CIGAR stats");
     
+    // Adjust target range based on strand
+    let (adjusted_target_start, adjusted_target_end) = if base_entry.strand == '-' {
+        (next_entry.target_start, base_entry.target_end)
+    } else {
+        (base_entry.target_start, next_entry.target_end)
+    };
+
+    // Create the merged entry
     PafEntry {
         query_name: base_entry.query_name.clone(),
         query_length: base_entry.query_length,
         query_start: base_entry.query_start,
-        query_end,
+        query_end: next_entry.query_end,
         strand: base_entry.strand,
         target_name: base_entry.target_name.clone(),
         target_length: base_entry.target_length,
-        target_start: base_entry.target_start,
-        target_end,
+        target_start: adjusted_target_start,
+        target_end: adjusted_target_end,
         num_matches: matches,
         alignment_length: block_len,
         mapping_quality: base_entry.mapping_quality,
@@ -607,12 +645,10 @@ fn process_chain(
 ) -> Result<Vec<PafEntry>, Box<dyn Error>> {
     // Handle simple cases
     if chain.len() <= 1 {
-        info!("Chain has only one entry, returning unchanged");
+        debug!("Chain has only one entry, returning unchanged");
         return Ok(chain.to_vec());
     }
-    
-    info!("Processing chain with {} entries", chain.len());
-    
+        
     // Sort chain by position
     let mut sorted_chain = chain.to_vec();
     sorted_chain.sort_by_key(|entry| entry.chain_pos);
@@ -621,64 +657,117 @@ fn process_chain(
     let mut merged_entry = sorted_chain[0].clone();
     
     // Process each pair of adjacent entries
-    for i in 0..(sorted_chain.len() - 1) {
-        info!("Processing chain pair {}/{}", i+1, sorted_chain.len()-1);
-        
+    for i in 0..(sorted_chain.len() - 1) {      
+        debug!("\tProcessing entries {} and {}", i, i + 1);
+
         // Get the current base entry and the next entry to merge
         let current = &merged_entry;
         let next = &sorted_chain[i+1];
-        
-        // Check for target overlap
-        let target_overlap = if next.target_start < current.target_end {
+
+        debug!("\tMerged query {}-{}; {}; target {}-{}", merged_entry.query_start, merged_entry.query_end, merged_entry.strand, merged_entry.target_start, merged_entry.target_end);
+        debug!("\tNext   query {}-{}; {}; target {}-{}", next.query_start, next.query_end, next.strand, next.target_start, next.target_end);
+        //debug!("\tCIGAR: {}", merged_entry.cigar);
+        debug!("\tChain: {}.{}.{}", merged_entry.chain_id, merged_entry.chain_length, next.chain_pos);
+
+        // Check for query overlap
+        let query_overlap = if next.query_start < current.query_end {
             // Calculate actual overlap size in base pairs
-            current.target_end.saturating_sub(next.target_start) as usize
+            current.query_end.saturating_sub(next.query_start) as usize
         } else {
             0
         };
+
+        // Check for target overlap with inverted logic for reverse strand
+        let target_overlap = if current.strand == '-' {
+            if next.target_end > current.target_start {
+                // Calculate actual overlap size in base pairs
+                next.target_end.saturating_sub(current.target_start) as usize
+            } else {
+                0
+            }
+        } else {
+            if next.target_start < current.target_end {
+                // Calculate actual overlap size in base pairs
+                current.target_end.saturating_sub(next.target_start) as usize
+            } else {
+                0
+            }
+        };
+
+        // Determine minimum erosion sizes for query and target separately
+        let min_query_erosion_size = if query_overlap > 0 {
+            // Use at least the overlap size for erosion if an overlap exists
+            let min_size = std::cmp::max(erosion_size, query_overlap);
+            debug!("\tUsing min. query erosion size of {} bp due to query overlap of {} bp", 
+                  min_size, query_overlap);
+            min_size
+        } else {
+            // No overlap, use the specified erosion size
+            debug!("\tUsing specified erosion size of {} bp due to no query overlap detected", erosion_size);
+            erosion_size
+        };
         
-        info!("Target overlap detected: {} bp", target_overlap);
+        let min_target_erosion_size = if target_overlap > 0 {
+            // Use at least the overlap size for erosion if an overlap exists
+            let min_size = std::cmp::max(erosion_size, target_overlap);
+            debug!("\tUsing min. target erosion size of {} bp due to target overlap of {} bp", 
+                  min_size, target_overlap);
+            min_size
+        } else {
+            // No overlap, use the specified erosion size
+            debug!("\tUsing specified erosion size of {} bp due to no target overlap detected", erosion_size);
+            erosion_size
+        };
         
-        // Determine effective erosion size based on overlap
-        // Use at least the overlap size for erosion if an overlap exists
-        let effective_erosion_size = std::cmp::max(erosion_size, target_overlap);
-        info!("Erosion size: {} bp", erosion_size);
-        info!("Overlap size: {} bp", target_overlap);
-        info!("Effective erosion size: {} bp", effective_erosion_size);
-                
-        if target_overlap > 0 {
-            info!("Using effective erosion size of {} bp due to overlap", effective_erosion_size);
-        }
-        
-        // Erode CIGARs at boundaries with the effective erosion size
+        // Erode CIGARs at boundaries with the effective erosion sizes
         let (eroded_current_cigar, current_query_removed, current_target_removed) = 
-            if effective_erosion_size > 0 {
-                // Always erode the end of current entry if there's an overlap
-                erode_cigar_end(&current.cigar, effective_erosion_size)?
+        if min_query_erosion_size > 0 || min_target_erosion_size > 0 {
+            if current.strand == '-' {
+                // For reverse strand, erode the start of the current entry
+                erode_cigar_start(&current.cigar, min_query_erosion_size, min_target_erosion_size)?
             } else {
-                (current.cigar.clone(), 0, 0)
-            };
-        
+                // For forward strand, erode the end of the current entry
+                erode_cigar_end(&current.cigar, min_query_erosion_size, min_target_erosion_size)?
+            }
+        } else {
+            (current.cigar.clone(), 0, 0)
+        };
+        debug!("\tEroded CIGARs - Current: query: {}, target: {}", current_query_removed, current_target_removed);
+
         let (eroded_next_cigar, next_query_removed, next_target_removed) = 
-            if effective_erosion_size > 0 && target_overlap == 0 {
-                // Only erode the start of next entry if there's no overlap
-                // (otherwise we've already handled the overlap by eroding the current entry)
-                erode_cigar_start(&next.cigar, effective_erosion_size)?
+        // Only erode the start of next entry if there's no overlap
+        // (otherwise we've already handled the overlap by eroding the current entry)
+        if (min_query_erosion_size > 0 && query_overlap == 0) || 
+        (min_target_erosion_size > 0 && target_overlap == 0) {
+            if current.strand == '-' {
+                // For reverse strand, erode the end of the next entry
+                erode_cigar_end(&next.cigar, min_query_erosion_size, min_target_erosion_size)?
             } else {
-                (next.cigar.clone(), 0, 0)
-            };
-        
+                // For forward strand, erode the start of the next entry
+                erode_cigar_start(&next.cigar, min_query_erosion_size, min_target_erosion_size)?
+            }
+        } else {
+            (next.cigar.clone(), 0, 0)
+        };
+        debug!("\tEroded CIGARs - Next: query: {}, target: {}", next_query_removed, next_target_removed);
+
         // Calculate gap coordinates accounting for erosion
         let query_gap_start = current.query_end - current_query_removed as u64;
         let query_gap_end = next.query_start + next_query_removed as u64;
-        let target_gap_start = current.target_end - current_target_removed as u64;
-        let target_gap_end = next.target_start + next_target_removed as u64;
-        
+        // Check the strand to determine the target gap coordinates
+        let (target_gap_start, target_gap_end) = if current.strand == '-' {
+            // For reverse strand, subtract the erosion from the start of the next entry
+            (next.target_end - next_target_removed as u64, current.target_start + current_target_removed as u64)
+        } else {
+            // For forward strand, add the erosion to the start of the next entry
+            (current.target_end - current_target_removed as u64, next.target_start + next_target_removed as u64)
+        };
+        debug!("\tGap coordinates - Query: {}-{}, Target: {}-{}", query_gap_start, query_gap_end, target_gap_start, target_gap_end);
+
         // Calculate gap sizes
-        let query_gap = query_gap_end.saturating_sub(query_gap_start);
-        // If we had an overlap and eroded the current entry's end, there should be no target gap anymore
-        let target_gap = target_gap_end.saturating_sub(target_gap_start);
-        
-        info!("After erosion - Query gap: {}, Target gap: {}", query_gap, target_gap);
+        let query_gap = query_gap_end - query_gap_start;
+        let target_gap = target_gap_end - target_gap_start;
+        debug!("\tAfter erosion - Query gap: {}, Target gap: {}", query_gap, target_gap);
         
         // Fetch sequences for alignment
         let gap_cigar = if query_gap == 0 && target_gap == 0 {
@@ -711,39 +800,23 @@ fn process_chain(
         };
         
         // Merge CIGARs
-        let merged_cigar = if gap_cigar.is_empty() {
-            merge_cigars(&[&eroded_current_cigar, &eroded_next_cigar])?
+        let merged_cigar = if current.strand == '-' {
+            merge_cigars(&[&eroded_next_cigar, &gap_cigar, &eroded_current_cigar])?
         } else {
             merge_cigars(&[&eroded_current_cigar, &gap_cigar, &eroded_next_cigar])?
         };
         
-        // Compute and validate coordinates
-        let (query_end, target_end) = compute_coordinates(
-            current.query_start, 
-            current.target_start, 
-            &merged_cigar
-        )?;
-        
         // Create the merged entry
         merged_entry = create_merged_entry(
-            current, next, &merged_cigar, query_end, target_end
+            current, next, &merged_cigar
         );
     }
     
+    debug!("\tMerged query {}-{}; {}; target {}-{}", merged_entry.query_start, merged_entry.query_end, merged_entry.strand, merged_entry.target_start, merged_entry.target_end);
+
     Ok(vec![merged_entry])
 }
 
-// Write PAF entries to file
-fn write_paf_file<P: AsRef<Path>>(path: P, entries: &[PafEntry]) -> Result<(), Box<dyn Error>> {
-    let file = File::create(path)?;
-    let mut writer = io::BufWriter::new(file);
-    
-    for entry in entries {
-        writeln!(writer, "{}", entry.to_string())?;
-    }
-    
-    Ok(())
-}
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
@@ -785,7 +858,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut processed_entries = Vec::new();
     
     for (chain_id, group) in chain_groups {
-        info!("Processing chain {} with {} entries", chain_id, group.len());
+        debug!("Processing chain {} with {} entries", chain_id, group.len());
         
         // Process chain and add results
         let chain_result = process_chain(&group, &query_db, &target_db, args.erosion_size)?;
