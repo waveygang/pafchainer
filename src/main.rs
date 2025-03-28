@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -25,13 +25,17 @@ struct Args {
     target: PathBuf,
     
     /// Size of boundary erosion in base pairs
-    #[clap(short, long, default_value = "1000")]
+    #[clap(short, long, default_value = "100")]
     erosion_size: usize,
     
     /// Output PAF file
     #[clap(short, long)]
     output: Option<PathBuf>,
     
+    /// Output in SAM format instead of PAF
+    #[clap(long)]
+    sam: bool,
+
     /// Number of threads to use
     #[clap(short, long, default_value = "4")]
     threads: usize,
@@ -559,13 +563,133 @@ fn read_paf_file<P: AsRef<Path>>(path: P) -> Result<Vec<PafEntry>, Box<dyn Error
     Ok(entries)
 }
 
-// Write PAF entries to file
-fn write_paf_file<P: AsRef<Path>>(path: P, entries: &[PafEntry]) -> Result<(), Box<dyn Error>> {
-    let file = File::create(path)?;
-    let mut writer = io::BufWriter::new(file);
-    
+// Write PAF entries to a writer
+fn write_paf_content<W: Write>(writer: &mut W, entries: &[PafEntry]) -> Result<(), Box<dyn Error>> {
     for entry in entries {
         writeln!(writer, "{}", entry.to_string())?;
+    }
+    
+    Ok(())
+}
+
+// Generate SAM header
+fn generate_sam_header(entries: &[PafEntry]) -> String {
+    let mut header = String::new();
+    
+    // Add SAM version header
+    header.push_str("@HD\tVN:1.6\tSO:unsorted\n");
+    
+    // Add reference sequence information
+    let mut target_seen = HashSet::new();
+    for entry in entries {
+        if !target_seen.contains(&entry.target_name) {
+            header.push_str(&format!(
+                "@SQ\tSN:{}\tLN:{}\n", 
+                entry.target_name, entry.target_length
+            ));
+            target_seen.insert(entry.target_name.clone());
+        }
+    }
+    
+    // Add program information
+    header.push_str("@PG\tID:chain_connect\tPN:chain_connect\tVN:0.1\n");
+    
+    header
+}
+
+// Convert PafEntry to SAM format
+fn paf_entry_to_sam(
+    entry: &PafEntry, 
+    query_db: &SequenceDB,
+    reference_id_map: &HashMap<String, usize>
+) -> Result<String, Box<dyn Error>> {
+    // Calculate flag
+    let flag = if entry.strand == '-' { 16 } else { 0 };
+    
+    // Get reference ID
+    let ref_id = match reference_id_map.get(&entry.target_name) {
+        Some(_) => entry.target_name.clone(),
+        None => "*".to_string(),
+    };
+
+    let sam_cigar = &entry.cigar;
+    
+    // Fetch sequence
+    let sequence = query_db.get_subsequence(
+        &entry.query_name,
+        entry.query_start,
+        entry.query_end,
+        false
+    )?;
+    
+    // Convert sequence to string
+    let seq_str = std::str::from_utf8(&sequence)
+        .map_err(|e| format!("Invalid UTF-8 sequence: {}", e))?;
+    
+    // MAPQ (mapping quality)
+    let mapq = entry.mapping_quality.min(255);
+    
+    // Calculate TLEN (observed template length)
+    let tlen = entry.target_end as i64 - entry.target_start as i64;
+    
+    // Build optional fields
+    let mut optional_fields = Vec::new();
+    
+    // Add chain info as optional field
+    optional_fields.push(format!("ch:Z:{}.{}.{}", 
+        entry.chain_id, entry.chain_length, entry.chain_pos));
+    
+    // Add NM tag (edit distance)
+    let (matches, mismatches, _, ins_bp, _, del_bp, _) = 
+        calculate_cigar_stats(&entry.cigar)?;
+    let edit_distance = mismatches + ins_bp + del_bp;
+    optional_fields.push(format!("NM:i:{}", edit_distance));
+    
+    // Add AS tag (alignment score)
+    // Simple scoring: +1 for match, -1 for mismatch/indel
+    let alignment_score = matches as i64 - edit_distance as i64;
+    optional_fields.push(format!("AS:i:{}", alignment_score));
+    
+    // Format SAM line
+    // QNAME FLAG RNAME POS MAPQ CIGAR RNEXT PNEXT TLEN SEQ QUAL [TAGS]
+    let sam_line = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t{}\t{}\t*\t{}",
+        entry.query_name,
+        flag,
+        ref_id,
+        entry.target_start + 1, // SAM is 1-based
+        mapq,
+        sam_cigar,
+        tlen,
+        seq_str,
+        optional_fields.join("\t")
+    );
+    
+    Ok(sam_line)
+}
+
+// Write SAM content to a writer
+fn write_sam_content<W: Write>(writer: &mut W, entries: &[PafEntry], query_db: &SequenceDB) -> Result<(), Box<dyn Error>> {
+    // Generate and write header
+    let header = generate_sam_header(entries);
+    write!(writer, "{}", header)?;
+    
+    // Create reference ID map for quick lookups
+    let mut reference_id_map = HashMap::new();
+    let mut ref_id = 0;
+    for entry in entries {
+        if !reference_id_map.contains_key(&entry.target_name) {
+            reference_id_map.insert(entry.target_name.clone(), ref_id);
+            ref_id += 1;
+        }
+    }
+    
+    // Write alignment lines
+    for entry in entries {
+        match paf_entry_to_sam(entry, query_db, &reference_id_map) {
+            Ok(sam_line) => writeln!(writer, "{}", sam_line)?,
+            Err(e) => warn!("Failed to convert entry to SAM: {}", e),
+        }
     }
     
     Ok(())
@@ -865,10 +989,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         processed_entries.extend(chain_result);
     }
     
-    // Write output
-    let output_path = args.output.unwrap_or_else(|| PathBuf::from("output.paf"));
-    info!("Writing {} processed entries to {}", processed_entries.len(), output_path.display());
-    write_paf_file(&output_path, &processed_entries)?;
+    // Determine output path
+    let mut writer = match args.output {
+        Some(file_path) => {
+            let file = File::create(file_path)?;
+            Box::new(io::BufWriter::new(file)) as Box<dyn Write>
+        },
+        None => {
+            Box::new(io::BufWriter::new(io::stdout())) as Box<dyn Write>
+        }
+    };
+
+    // Write output in appropriate format
+    if args.sam {
+        write_sam_content(&mut writer, &processed_entries, &query_db)?;
+    } else {
+        write_paf_content(&mut writer, &processed_entries)?;
+    }
     
     info!("Done!");
     Ok(())
