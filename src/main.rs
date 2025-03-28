@@ -10,7 +10,7 @@ use rust_htslib::faidx::Reader as FastaReader;
 use libc;
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about = "Process PAF files and connect chains using WFA2 alignment")]
+#[clap(author, version, about = "A tool for merging WFMASH's alignment chains using the WFA algorithm.")]
 struct Args {
     /// Input PAF file
     #[clap(short, long)]
