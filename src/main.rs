@@ -619,7 +619,7 @@ fn paf_entry_to_sam(
         &entry.query_name,
         entry.query_start,
         entry.query_end,
-        false
+        entry.strand == '-'
     )?;
     
     // Convert sequence to string
