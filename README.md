@@ -1,4 +1,4 @@
-# chain-connect
+# pafchainer
 
 A tool to process PAF (Pairwise Alignment Format) files and connect alignment chains using WFA (Wavefront Alignment Algorithm).
 

@@ -592,7 +592,7 @@ fn generate_sam_header(entries: &[PafEntry]) -> String {
     }
     
     // Add program information
-    header.push_str("@PG\tID:chain_connect\tPN:chain_connect\tVN:0.1\n");
+    header.push_str("@PG\tID:pafchainer\tPN:pafchainer\tVN:0.1.0\n");
     
     header
 }
