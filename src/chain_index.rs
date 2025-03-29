@@ -171,38 +171,44 @@ impl ChainIndex {
     }
 
     /// Build index for a compressed PAF file using virtual offsets
-    fn build_index_for_compressed_file(paf_path: &Path, chains: &mut HashMap<u64, Vec<ChainEntryInfo>>) -> Result<(), Box<dyn Error>> {
+    fn build_index_for_compressed_file(
+        paf_path: &Path,
+        chains: &mut HashMap<u64, Vec<ChainEntryInfo>>,
+    ) -> Result<(), Box<dyn Error>> {
         let file = File::open(paf_path)?;
         let mut reader = bgzf::Reader::new(file);
-        
+
         let mut line = Vec::new();
         let mut line_str = String::new();
-        
+
         loop {
             // Get the current virtual position before reading the line
             let virtual_offset = reader.virtual_position();
-            
+
             // Read a line
             line.clear();
             let bytes_read = reader.read_until(b'\n', &mut line)?;
             if bytes_read == 0 {
                 break;
             }
-            
+
             // Convert to string for parsing
             line_str.clear();
             line_str.push_str(std::str::from_utf8(&line)?);
-            
+
             if let Ok(entry) = PafEntry::parse_from_line(&line_str) {
                 let chain_entry = ChainEntryInfo {
                     offset: virtual_offset.into(), // Store virtual offset (VirtualPosition)
                     length: bytes_read,
                     chain_pos: entry.chain_pos,
                 };
-                chains.entry(entry.chain_id).or_insert_with(Vec::new).push(chain_entry);
+                chains
+                    .entry(entry.chain_id)
+                    .or_insert_with(Vec::new)
+                    .push(chain_entry);
             }
         }
-        
+
         Ok(())
     }
 
@@ -269,31 +275,39 @@ impl ChainIndex {
     }
 
     /// Load chain entries from a compressed file using virtual offsets
-    fn load_chain_compressed(&self, chain_id: u64, entries: &[ChainEntryInfo]) -> Result<Vec<PafEntry>, Box<dyn Error>> {
+    fn load_chain_compressed(
+        &self,
+        chain_id: u64,
+        entries: &[ChainEntryInfo],
+    ) -> Result<Vec<PafEntry>, Box<dyn Error>> {
         let file = File::open(&self.paf_file)?;
         let mut reader = bgzf::Reader::new(file);
         let mut paf_entries = Vec::with_capacity(entries.len());
-        
+
         for entry_info in entries {
             let mut buffer = vec![0; entry_info.length];
-            
+
             // Seek directly using virtual offset - no GZI needed
             // Convert u64 back to VirtualPosition for seeking
             let virtual_position = bgzf::VirtualPosition::from(entry_info.offset);
             reader.seek(virtual_position)?;
             reader.read_exact(&mut buffer)?;
-            
+
             let line = std::str::from_utf8(&buffer[..buffer.len() - 1])?; // Remove newline
             if let Ok(paf_entry) = PafEntry::parse_from_line(line) {
                 // Verify chain_id matches
                 if paf_entry.chain_id == chain_id {
                     paf_entries.push(paf_entry);
                 } else {
-                    return Err(format!("Chain ID mismatch: expected {}, got {}", chain_id, paf_entry.chain_id).into());
+                    return Err(format!(
+                        "Chain ID mismatch: expected {}, got {}",
+                        chain_id, paf_entry.chain_id
+                    )
+                    .into());
                 }
             }
         }
-        
+
         Ok(paf_entries)
     }
 
