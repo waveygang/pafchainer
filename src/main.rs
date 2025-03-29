@@ -1,6 +1,6 @@
 use std::collections::{HashSet, HashMap};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::error::Error;
 use clap::Parser;
@@ -8,6 +8,9 @@ use log::{info, warn, debug};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, AlignmentStatus};
 use rust_htslib::faidx::Reader as FastaReader;
 use libc;
+use std::num::NonZeroUsize;
+
+use pafchainer::chain_index::{PafEntry, ChainIndex};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about = "A tool for merging WFMASH's alignment chains using the WFA algorithm.")]
@@ -38,33 +41,11 @@ struct Args {
 
     /// Number of threads to use
     #[clap(short, long, default_value = "4")]
-    threads: usize,
+    threads: NonZeroUsize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "0")]
     verbose: u8,
-}
-
-// PAF entry representation
-#[derive(Debug, Clone)]
-struct PafEntry {
-    query_name: String,
-    query_length: u64,
-    query_start: u64,
-    query_end: u64,
-    strand: char,
-    target_name: String,
-    target_length: u64,
-    target_start: u64,
-    target_end: u64,
-    num_matches: u64,
-    alignment_length: u64,
-    mapping_quality: u64,
-    tags: Vec<(String, String)>,
-    chain_id: u64,
-    chain_length: u64,
-    chain_pos: u64,
-    cigar: String,
 }
 
 // CIGAR operation
@@ -112,97 +93,6 @@ impl SequenceDB {
         } else {
             Ok(seq)
         }
-    }
-}
-
-impl PafEntry {
-    // Parse a PAF entry from a line
-    fn parse_from_line(line: &str) -> Result<Self, Box<dyn Error>> {
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 12 {
-            return Err("PAF line has fewer than 12 required fields".into());
-        }
-
-        let mut entry = PafEntry {
-            query_name: fields[0].to_string(),
-            query_length: fields[1].parse()?,
-            query_start: fields[2].parse()?,
-            query_end: fields[3].parse()?,
-            strand: if fields[4] == "+" { '+' } else { '-' },
-            target_name: fields[5].to_string(),
-            target_length: fields[6].parse()?,
-            target_start: fields[7].parse()?,
-            target_end: fields[8].parse()?,
-            num_matches: fields[9].parse()?,
-            alignment_length: fields[10].parse()?,
-            mapping_quality: fields[11].parse()?,
-            tags: Vec::new(),
-            chain_id: 0,
-            chain_length: 0,
-            chain_pos: 0,
-            cigar: String::new(),
-        };
-
-        // Parse optional tags
-        for i in 12..fields.len() {
-            let tag_parts: Vec<&str> = fields[i].split(':').collect();
-            if tag_parts.len() >= 3 {
-                let tag_name = format!("{}:{}", tag_parts[0], tag_parts[1]);
-                let tag_value = tag_parts[2..].join(":");
-                
-                // Parse chain information
-                if tag_name == "ch:Z" {
-                    let chain_parts: Vec<&str> = tag_value.split('.').collect();
-                    if chain_parts.len() >= 3 {
-                        entry.chain_id = chain_parts[0].parse()?;
-                        entry.chain_length = chain_parts[1].parse()?;
-                        entry.chain_pos = chain_parts[2].parse()?;
-                    } else {
-                        return Err(format!("Invalid ch:Z tag format: {}", tag_value).into());
-                    }
-                }
-                
-                // Parse CIGAR string
-                if tag_name == "cg:Z" {
-                    entry.cigar = tag_value.clone();
-                }
-                
-                entry.tags.push((tag_name, tag_value));
-            }
-        }
-
-        // Verify required tags
-        if entry.chain_id == 0 || entry.cigar.is_empty() {
-            return Err("Missing required 'ch:Z' or 'cg:Z' tag".into());
-        }
-
-        Ok(entry)
-    }
-    
-    // Convert PAF entry to string
-    fn to_string(&self) -> String {
-        let mut line = format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            self.query_name,
-            self.query_length,
-            self.query_start,
-            self.query_end,
-            if self.strand == '+' { "+" } else { "-" },
-            self.target_name,
-            self.target_length,
-            self.target_start,
-            self.target_end,
-            self.num_matches,
-            self.alignment_length,
-            self.mapping_quality
-        );
-        
-        // Add tags
-        for (tag, value) in &self.tags {
-            line.push_str(&format!("\t{}:{}", tag, value));
-        }
-        
-        line
     }
 }
 
@@ -548,21 +438,6 @@ fn calculate_cigar_stats(cigar: &str) -> Result<(u64, u64, u64, u64, u64, u64, u
     Ok((matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len))
 }
 
-// Read PAF file
-fn read_paf_file<P: AsRef<Path>>(path: P) -> Result<Vec<PafEntry>, Box<dyn Error>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    
-    for line in reader.lines() {
-        if let Ok(entry) = PafEntry::parse_from_line(&line?) {
-            entries.push(entry);
-        }
-    }
-    
-    Ok(entries)
-}
-
 // Write PAF entries to a writer
 fn write_paf_content<W: Write>(writer: &mut W, entries: &[PafEntry]) -> Result<(), Box<dyn Error>> {
     for entry in entries {
@@ -693,17 +568,6 @@ fn write_sam_content<W: Write>(writer: &mut W, entries: &[PafEntry], query_db: &
     }
     
     Ok(())
-}
-
-// Group entries by chain_id
-fn group_by_chain(entries: Vec<PafEntry>) -> HashMap<u64, Vec<PafEntry>> {
-    let mut chain_groups = HashMap::new();
-    
-    for entry in entries {
-        chain_groups.entry(entry.chain_id).or_insert_with(Vec::new).push(entry);
-    }
-    
-    chain_groups
 }
 
 // Helper function to update tags in a PafEntry
@@ -955,40 +819,47 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .init();
     
-    // Set number of threads if needed
-    if args.threads > 1 {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(args.threads)
-            .build_global()?;
-    }
+    // Configure thread pool
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads.into())
+        .build_global()?;
     
+    // Check for or build chain index
+    let index_path = args.paf.with_extension("cidx"); // Chain index file
+    let chain_index = if index_path.exists() {
+        info!("Loading chain index from {}...", index_path.display());
+        ChainIndex::load(&index_path)?
+    } else {
+        info!("Building chain index for {}...", args.paf.display());
+        let index = ChainIndex::build(&args.paf)?;
+        info!("Saving chain index to {}...", index_path.display());
+        index.save(&index_path)?;
+        index
+    };
+    info!("Found {} chains in PAF file", chain_index.num_chains());
+
     // Load sequence databases
     info!("Loading query sequences from {}...", args.query.display());
     let query_db = SequenceDB::new(&args.query)?;
     
     info!("Loading target sequences from {}...", args.target.display());
     let target_db = SequenceDB::new(&args.target)?;
-    
-    // Read and process PAF file
-    info!("Reading PAF file {}...", args.paf.display());
-    let entries = read_paf_file(&args.paf)?;
-    info!("Read {} PAF entries", entries.len());
-    
-    // Group entries by chain
-    let chain_groups = group_by_chain(entries);
-    info!("Found {} chains", chain_groups.len());
-    
-    // Process each chain
+       
+    // Process each chain individually
     let mut processed_entries = Vec::new();
     
-    for (chain_id, group) in chain_groups {
-        debug!("Processing chain {} with {} entries", chain_id, group.len());
+    for chain_id in chain_index.get_chain_ids() {
+        debug!("Processing chain {} ...", chain_id);
         
-        // Process chain and add results
-        let chain_result = process_chain(&group, &query_db, &target_db, args.erosion_size)?;
+        // Load chain entries for this specific chain only
+        let chain_entries = chain_index.load_chain(chain_id)?;
+        debug!("Loaded {} entries for chain {}", chain_entries.len(), chain_id);
+        
+        // Process chain and add results to the output
+        let chain_result = process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
         processed_entries.extend(chain_result);
     }
-    
+
     // Determine output path
     let mut writer = match args.output {
         Some(file_path) => {
