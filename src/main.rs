@@ -11,7 +11,10 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use pafchainer::chain_index::{ChainIndex, PafEntry};
-use pafchainer::cigar::{CigarOp, cigar_u8_to_ops, ops_to_cigar, erode_cigar_end, erode_cigar_start, calculate_cigar_stats, merge_cigar_ops};
+use pafchainer::cigar::{
+    calculate_cigar_stats, cigar_u8_to_ops, erode_cigar_end, erode_cigar_start, merge_cigar_ops,
+    ops_to_cigar, CigarOp,
+};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -289,7 +292,11 @@ fn write_sam_content<W: Write>(
 }
 
 // Helper function to update tags in a PafEntry
-fn update_tags(tags: &[(String, String)], cigar_ops: &[CigarOp], chain_id: u64) -> Vec<(String, String)> {
+fn update_tags(
+    tags: &[(String, String)],
+    cigar_ops: &[CigarOp],
+    chain_id: u64,
+) -> Vec<(String, String)> {
     let mut new_tags = Vec::with_capacity(tags.len());
     for (tag, value) in tags {
         if tag == "cg:Z" {
@@ -307,7 +314,7 @@ fn update_tags(tags: &[(String, String)], cigar_ops: &[CigarOp], chain_id: u64) 
 fn create_merged_entry(
     base_entry: &PafEntry,
     next_entry: &PafEntry,
-    merged_ops: &[CigarOp]
+    merged_ops: &[CigarOp],
 ) -> PafEntry {
     // Calculate statistics from merged CIGAR
     let (matches, _, _, _, _, _, block_len) =
@@ -481,10 +488,18 @@ fn process_chain(
             {
                 if current.strand == '-' {
                     // For reverse strand, erode the end of the next entry
-                    erode_cigar_end(&next.cigar_ops, min_query_erosion_size, min_target_erosion_size)?
+                    erode_cigar_end(
+                        &next.cigar_ops,
+                        min_query_erosion_size,
+                        min_target_erosion_size,
+                    )?
                 } else {
                     // For forward strand, erode the start of the next entry
-                    erode_cigar_start(&next.cigar_ops, min_query_erosion_size, min_target_erosion_size)?
+                    erode_cigar_start(
+                        &next.cigar_ops,
+                        min_query_erosion_size,
+                        min_target_erosion_size,
+                    )?
                 }
             } else {
                 (next.cigar_ops.clone(), 0, 0)
@@ -534,7 +549,7 @@ fn process_chain(
         } else if query_gap == 0 && target_gap > 0 {
             // Target gap only - add deletion
             vec![CigarOp('D', target_gap as usize)]
-        } else { 
+        } else {
             // Both query and target have gaps - perform alignment
             let gap_query_seq = query_db.get_subsequence(
                 &current.query_name,
