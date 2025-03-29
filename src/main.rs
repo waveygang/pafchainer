@@ -290,11 +290,11 @@ fn process_chain(
     query_db: &SequenceDB,
     target_db: &SequenceDB,
     erosion_size: usize,
-) -> Result<Vec<PafEntry>, Box<dyn Error>> {
+) -> Result<PafEntry, Box<dyn Error>> {
     // Handle simple cases
     if chain.len() <= 1 {
         debug!("Chain has only one entry, returning unchanged");
-        return Ok(chain.to_vec());
+        return Ok(chain[0].clone());
     }
 
     // Sort chain by position
@@ -524,7 +524,7 @@ fn process_chain(
         merged_entry.target_end
     );
 
-    Ok(vec![merged_entry])
+    Ok(merged_entry)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -609,11 +609,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             let chain_result =
                 process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
-
-            for entry in &chain_result {
-                let sam_line = paf_entry_to_sam(entry, &query_db, &reference_info)?;
-                writeln!(writer, "{}", sam_line)?;
-            }
+            let sam_line = paf_entry_to_sam(&chain_result, &query_db, &reference_info)?;
+            writeln!(writer, "{}", sam_line)?;
         }
     } else {
         // For PAF output, we can directly process and write
@@ -626,10 +623,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             let chain_result =
                 process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
-
-            for entry in &chain_result {
-                writeln!(writer, "{}", entry.to_string())?;
-            }
+            writeln!(writer, "{}", chain_result.to_string())?;
         }
     }
 
