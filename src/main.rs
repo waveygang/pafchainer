@@ -3,7 +3,7 @@ use lib_wfa2::affine_wavefront::{AffineWavefronts, AlignmentStatus};
 use libc;
 use log::{debug, info, warn};
 use rust_htslib::faidx::Reader as FastaReader;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, Write};
@@ -156,51 +156,17 @@ fn align_sequences_wfa(query: &[u8], target: &[u8]) -> Result<Vec<CigarOp>, Box<
     Ok(cigar_ops)
 }
 
-// Write PAF entries to a writer
-fn write_paf_content<W: Write>(writer: &mut W, entries: &[PafEntry]) -> Result<(), Box<dyn Error>> {
-    for entry in entries {
-        writeln!(writer, "{}", entry.to_string())?;
-    }
-
-    Ok(())
-}
-
-// Generate SAM header
-fn generate_sam_header(entries: &[PafEntry]) -> String {
-    let mut header = String::new();
-
-    // Add SAM version header
-    header.push_str("@HD\tVN:1.6\tSO:unsorted\n");
-
-    // Add reference sequence information
-    let mut target_seen = HashSet::new();
-    for entry in entries {
-        if !target_seen.contains(&entry.target_name) {
-            header.push_str(&format!(
-                "@SQ\tSN:{}\tLN:{}\n",
-                entry.target_name, entry.target_length
-            ));
-            target_seen.insert(entry.target_name.clone());
-        }
-    }
-
-    // Add program information
-    header.push_str("@PG\tID:pafchainer\tPN:pafchainer\tVN:0.1.0\n");
-
-    header
-}
-
 // Convert PafEntry to SAM format
 fn paf_entry_to_sam(
     entry: &PafEntry,
     query_db: &SequenceDB,
-    reference_id_map: &HashMap<String, usize>,
+    reference_info: &HashMap<String, u64>,
 ) -> Result<String, Box<dyn Error>> {
     // Calculate flag
     let flag = if entry.strand == '-' { 16 } else { 0 };
 
     // Get reference ID
-    let ref_id = match reference_id_map.get(&entry.target_name) {
+    let ref_id = match reference_info.get(&entry.target_name) {
         Some(_) => entry.target_name.clone(),
         None => "*".to_string(),
     };
@@ -258,37 +224,6 @@ fn paf_entry_to_sam(
     );
 
     Ok(sam_line)
-}
-
-// Write SAM content to a writer
-fn write_sam_content<W: Write>(
-    writer: &mut W,
-    entries: &[PafEntry],
-    query_db: &SequenceDB,
-) -> Result<(), Box<dyn Error>> {
-    // Generate and write header
-    let header = generate_sam_header(entries);
-    write!(writer, "{}", header)?;
-
-    // Create reference ID map for quick lookups
-    let mut reference_id_map = HashMap::new();
-    let mut ref_id = 0;
-    for entry in entries {
-        if !reference_id_map.contains_key(&entry.target_name) {
-            reference_id_map.insert(entry.target_name.clone(), ref_id);
-            ref_id += 1;
-        }
-    }
-
-    // Write alignment lines
-    for entry in entries {
-        match paf_entry_to_sam(entry, query_db, &reference_id_map) {
-            Ok(sam_line) => writeln!(writer, "{}", sam_line)?,
-            Err(e) => warn!("Failed to convert entry to SAM: {}", e),
-        }
-    }
-
-    Ok(())
 }
 
 // Helper function to update tags in a PafEntry
@@ -631,26 +566,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("Loading target sequences from {}...", args.target.display());
     let target_db = SequenceDB::new(&args.target)?;
 
-    // Process each chain individually
-    let mut processed_entries = Vec::new();
-
-    for chain_id in chain_index.get_chain_ids() {
-        debug!("Processing chain {} ...", chain_id);
-
-        // Load chain entries for this specific chain only
-        let chain_entries = chain_index.load_chain(chain_id)?;
-        debug!(
-            "Loaded {} entries for chain {}",
-            chain_entries.len(),
-            chain_id
-        );
-
-        // Process chain and add results to the output
-        let chain_result = process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
-        processed_entries.extend(chain_result);
-    }
-
-    // Determine output path
+    // Create output writer
     let mut writer = match args.output {
         Some(file_path) => {
             let file = File::create(file_path)?;
@@ -659,11 +575,62 @@ fn main() -> Result<(), Box<dyn Error>> {
         None => Box::new(io::BufWriter::new(io::stdout())) as Box<dyn Write>,
     };
 
-    // Write output in appropriate format
+    // For SAM output, we need to handle the header
     if args.sam {
-        write_sam_content(&mut writer, &processed_entries, &query_db)?;
+        // Initialize reference tracking and gather target information
+        let mut reference_info: HashMap<String, u64> = HashMap::new();
+
+        // First pass: collect reference information
+        for chain_id in chain_index.get_chain_ids() {
+            let chain_entries = chain_index.load_chain(chain_id)?;
+            for entry in &chain_entries {
+                reference_info.insert(entry.target_name.clone(), entry.target_length);
+            }
+        }
+
+        // Write SAM header
+        write!(writer, "@HD\tVN:1.6\tSO:unsorted\n")?;
+
+        // Write reference sequences with lengths collected from PAF entries
+        for (ref_name, ref_length) in &reference_info {
+            write!(writer, "@SQ\tSN:{}\tLN:{}\n", ref_name, ref_length)?;
+        }
+
+        // Add program information
+        write!(writer, "@PG\tID:pafchainer\tPN:pafchainer\tVN:0.1.0\n")?;
+
+        // Second pass: process and write entries
+        for chain_id in chain_index.get_chain_ids() {
+            let chain_entries = chain_index.load_chain(chain_id)?;
+            debug!(
+                "Loaded {} entries for chain {}",
+                chain_entries.len(),
+                chain_id
+            );
+            let chain_result =
+                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
+
+            for entry in &chain_result {
+                let sam_line = paf_entry_to_sam(entry, &query_db, &reference_info)?;
+                writeln!(writer, "{}", sam_line)?;
+            }
+        }
     } else {
-        write_paf_content(&mut writer, &processed_entries)?;
+        // For PAF output, we can directly process and write
+        for chain_id in chain_index.get_chain_ids() {
+            let chain_entries = chain_index.load_chain(chain_id)?;
+            debug!(
+                "Loaded {} entries for chain {}",
+                chain_entries.len(),
+                chain_id
+            );
+            let chain_result =
+                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
+
+            for entry in &chain_result {
+                writeln!(writer, "{}", entry.to_string())?;
+            }
+        }
     }
 
     info!("Done!");
