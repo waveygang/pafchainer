@@ -6,6 +6,8 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::cigar::{cigar_to_ops, CigarOp};
+
 // PAF entry representation
 #[derive(Debug, Clone)]
 pub struct PafEntry {
@@ -25,7 +27,7 @@ pub struct PafEntry {
     pub chain_id: u64,
     pub chain_length: u64,
     pub chain_pos: u64,
-    pub cigar: String,
+    pub cigar_ops: Vec<CigarOp>,
 }
 
 impl PafEntry {
@@ -53,7 +55,7 @@ impl PafEntry {
             chain_id: 0,
             chain_length: 0,
             chain_pos: 0,
-            cigar: String::new(),
+            cigar_ops: Vec::new(),
         };
 
         // Parse optional tags
@@ -77,7 +79,7 @@ impl PafEntry {
 
                 // Parse CIGAR string
                 if tag_name == "cg:Z" {
-                    entry.cigar = tag_value.clone();
+                    entry.cigar_ops = cigar_to_ops(&tag_value)?;
                 }
 
                 entry.tags.push((tag_name, tag_value));
@@ -85,7 +87,7 @@ impl PafEntry {
         }
 
         // Verify required tags
-        if entry.chain_id == 0 || entry.cigar.is_empty() {
+        if entry.chain_id == 0 || entry.cigar_ops.is_empty() {
             return Err("Missing required 'ch:Z' or 'cg:Z' tag".into());
         }
 
