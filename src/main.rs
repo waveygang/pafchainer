@@ -16,8 +16,8 @@ use pafchainer::cigar::{
     ops_to_cigar, CigarOp,
 };
 
-use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -598,38 +598,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     let writer = Arc::new(Mutex::new(writer));
 
     // Process in parallel and write entries
-    chain_index.get_chain_ids().into_par_iter().for_each(|chain_id| {
-        // Each thread creates its own FASTA readers.
-        let query_db = SequenceDB::new(&args.query)
-            .expect("Failed to open query FASTA in thread");
-        let target_db = SequenceDB::new(&args.target)
-            .expect("Failed to open target FASTA in thread");
+    chain_index
+        .get_chain_ids()
+        .into_par_iter()
+        .for_each(|chain_id| {
+            // Each thread creates its own FASTA readers.
+            let query_db =
+                SequenceDB::new(&args.query).expect("Failed to open query FASTA in thread");
+            let target_db =
+                SequenceDB::new(&args.target).expect("Failed to open target FASTA in thread");
 
-        // Load and process the chain
-        let chain_entries = chain_index
-            .load_chain(chain_id)
-            .expect("Failed to load chain");
-        debug!(
-            "Loaded {} entries for chain {}",
-            chain_entries.len(),
-            chain_id
-        );
-        let merged_entry = process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)
-            .expect("Failed to process chain");
+            // Load and process the chain
+            let chain_entries = chain_index
+                .load_chain(chain_id)
+                .expect("Failed to load chain");
+            debug!(
+                "Loaded {} entries for chain {}",
+                chain_entries.len(),
+                chain_id
+            );
+            let merged_entry =
+                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)
+                    .expect("Failed to process chain");
 
-        // Convert to SAM or PAF format and write immediately
-        if args.sam {
-            let sam_line =
-                paf_entry_to_sam(&merged_entry, &query_db, &reference_info)
+            // Convert to SAM or PAF format and write immediately
+            if args.sam {
+                let sam_line = paf_entry_to_sam(&merged_entry, &query_db, &reference_info)
                     .expect("Failed to convert to SAM");
-            let mut writer_lock = writer.lock().expect("Failed to lock writer");
-            writeln!(writer_lock, "{}", sam_line).expect("Failed to write output");
-        } else {
-            let paf_line = merged_entry.to_string();
-            let mut writer_lock = writer.lock().expect("Failed to lock writer");
-            writeln!(writer_lock, "{}", paf_line).expect("Failed to write output");
-        }
-    });
+                let mut writer_lock = writer.lock().expect("Failed to lock writer");
+                writeln!(writer_lock, "{}", sam_line).expect("Failed to write output");
+            } else {
+                let paf_line = merged_entry.to_string();
+                let mut writer_lock = writer.lock().expect("Failed to lock writer");
+                writeln!(writer_lock, "{}", paf_line).expect("Failed to write output");
+            }
+        });
 
     info!("Done!");
     Ok(())
