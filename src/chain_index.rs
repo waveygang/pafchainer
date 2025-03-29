@@ -1,4 +1,3 @@
-use log::{debug, info};
 use noodles::bgzf;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -149,7 +148,6 @@ impl ChainIndex {
         let paf_str = paf_path.to_string_lossy().to_string();
         let is_compressed = [".gz", ".bgz"].iter().any(|e| paf_str.ends_with(e));
 
-        info!("Building chain index for {}...", paf_str);
         let mut chains = HashMap::new();
 
         if is_compressed {
@@ -165,7 +163,6 @@ impl ChainIndex {
             entries.sort_by_key(|e| e.chain_pos);
         }
 
-        info!("Found {} chains", chains.len());
         Ok(Self {
             chains,
             paf_file: paf_str,
@@ -173,40 +170,39 @@ impl ChainIndex {
         })
     }
 
-    /// Build index for a compressed PAF file
-    fn build_index_for_compressed_file(
-        paf_path: &Path,
-        chains: &mut HashMap<u64, Vec<ChainEntryInfo>>,
-    ) -> Result<(), Box<dyn Error>> {
+    /// Build index for a compressed PAF file using virtual offsets
+    fn build_index_for_compressed_file(paf_path: &Path, chains: &mut HashMap<u64, Vec<ChainEntryInfo>>) -> Result<(), Box<dyn Error>> {
         let file = File::open(paf_path)?;
-        let reader = bgzf::Reader::new(file);
-        let mut buf_reader = BufReader::new(reader);
-
-        let mut offset = 0;
-        let mut line = String::new();
-
+        let mut reader = bgzf::Reader::new(file);
+        
+        let mut line = Vec::new();
+        let mut line_str = String::new();
+        
         loop {
+            // Get the current virtual position before reading the line
+            let virtual_offset = reader.virtual_position();
+            
+            // Read a line
             line.clear();
-            let bytes_read = buf_reader.read_line(&mut line)?;
+            let bytes_read = reader.read_until(b'\n', &mut line)?;
             if bytes_read == 0 {
                 break;
             }
-
-            if let Ok(entry) = PafEntry::parse_from_line(&line) {
+            
+            // Convert to string for parsing
+            line_str.clear();
+            line_str.push_str(std::str::from_utf8(&line)?);
+            
+            if let Ok(entry) = PafEntry::parse_from_line(&line_str) {
                 let chain_entry = ChainEntryInfo {
-                    offset,
+                    offset: virtual_offset.into(), // Store virtual offset (VirtualPosition)
                     length: bytes_read,
                     chain_pos: entry.chain_pos,
                 };
-                chains
-                    .entry(entry.chain_id)
-                    .or_insert_with(Vec::new)
-                    .push(chain_entry);
+                chains.entry(entry.chain_id).or_insert_with(Vec::new).push(chain_entry);
             }
-
-            offset += bytes_read as u64;
         }
-
+        
         Ok(())
     }
 
@@ -242,14 +238,28 @@ impl ChainIndex {
         Ok(())
     }
 
+    /// Save the index to a file
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
+        let file = File::create(path)?;
+        let writer = io::BufWriter::new(file);
+        bincode::serialize_into(writer, self)?;
+        Ok(())
+    }
+
+    /// Load an index from a file
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error>> {
+        let file = File::open(path)?;
+        let reader = io::BufReader::new(file);
+        let index: ChainIndex = bincode::deserialize_from(reader)?;
+        Ok(index)
+    }
+
     /// Load all entries for a specific chain
     pub fn load_chain(&self, chain_id: u64) -> Result<Vec<PafEntry>, Box<dyn Error>> {
         let entries = match self.chains.get(&chain_id) {
             Some(entries) => entries,
             None => return Ok(Vec::new()),
         };
-
-        debug!("Loading chain {} with {} entries", chain_id, entries.len());
 
         if self.is_compressed {
             self.load_chain_compressed(chain_id, entries)
@@ -258,40 +268,32 @@ impl ChainIndex {
         }
     }
 
-    /// Load chain entries from a compressed file
-    fn load_chain_compressed(
-        &self,
-        chain_id: u64,
-        entries: &[ChainEntryInfo],
-    ) -> Result<Vec<PafEntry>, Box<dyn Error>> {
-        let gzi_path = format!("{}.gzi", self.paf_file);
-        let gzi_index = bgzf::gzi::read(gzi_path)?;
-
+    /// Load chain entries from a compressed file using virtual offsets
+    fn load_chain_compressed(&self, chain_id: u64, entries: &[ChainEntryInfo]) -> Result<Vec<PafEntry>, Box<dyn Error>> {
         let file = File::open(&self.paf_file)?;
         let mut reader = bgzf::Reader::new(file);
         let mut paf_entries = Vec::with_capacity(entries.len());
-
+        
         for entry_info in entries {
             let mut buffer = vec![0; entry_info.length];
-
-            reader.seek_by_uncompressed_position(&gzi_index, entry_info.offset)?;
+            
+            // Seek directly using virtual offset - no GZI needed
+            // Convert u64 back to VirtualPosition for seeking
+            let virtual_position = bgzf::VirtualPosition::from(entry_info.offset);
+            reader.seek(virtual_position)?;
             reader.read_exact(&mut buffer)?;
-
+            
             let line = std::str::from_utf8(&buffer[..buffer.len() - 1])?; // Remove newline
             if let Ok(paf_entry) = PafEntry::parse_from_line(line) {
                 // Verify chain_id matches
                 if paf_entry.chain_id == chain_id {
                     paf_entries.push(paf_entry);
                 } else {
-                    return Err(format!(
-                        "Chain ID mismatch: expected {}, got {}",
-                        chain_id, paf_entry.chain_id
-                    )
-                    .into());
+                    return Err(format!("Chain ID mismatch: expected {}, got {}", chain_id, paf_entry.chain_id).into());
                 }
             }
         }
-
+        
         Ok(paf_entries)
     }
 
@@ -327,22 +329,6 @@ impl ChainIndex {
         }
 
         Ok(paf_entries)
-    }
-
-    /// Save the index to a file
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
-        let file = File::create(path)?;
-        let writer = io::BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
-        Ok(())
-    }
-
-    /// Load an index from a file
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error>> {
-        let file = File::open(path)?;
-        let reader = io::BufReader::new(file);
-        let index: ChainIndex = bincode::deserialize_from(reader)?;
-        Ok(index)
     }
 
     /// Get a list of all chain IDs in the index
