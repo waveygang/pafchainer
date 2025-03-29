@@ -68,6 +68,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bio-types"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -85,6 +94,12 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
+name = "bytes"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "cc"
@@ -165,6 +180,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a97769d94ddab943e4510d138150169a2758b5ef3eb191a9ee688de3e23ef7b3"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06ba6d68e24814cb8de6bb986db8222d3a027d15872cabc0d18817bc3c0e4471"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -267,6 +291,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11faaf5a5236997af9848be0bef4db95824b1d534ebc64d0f0c6cf3e67bd38dc"
 dependencies = [
  "crc32fast",
+ "libz-rs-sys",
  "miniz_oxide",
 ]
 
@@ -514,6 +539,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c19937216e9d3aa9956d9bb8dfc0b0c8beb6058fc4f7a4dc4d850edf86a237d6"
 
 [[package]]
+name = "libz-rs-sys"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "902bc563b5d65ad9bba616b490842ef0651066a1a1dc3ce1087113ffcb873c8d"
+dependencies = [
+ "zlib-rs",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -569,6 +603,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "noodles"
+version = "0.95.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf45cb96fcf58766008616b1372e523f5402c0fa3e692734ef64ea60fa912bf3"
+dependencies = [
+ "noodles-bgzf",
+]
+
+[[package]]
+name = "noodles-bgzf"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb4a45ef5a49e622bcd33cbf9a8323ad3c2b8dd2395526354bc901983295fcf8"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "crossbeam-channel",
+ "flate2",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -578,14 +633,17 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 name = "pafchainer"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "clap",
  "env_logger",
  "flate2",
  "lib_wfa2",
  "libc",
  "log",
+ "noodles",
  "rayon",
  "rust-htslib",
+ "serde",
  "thiserror 2.0.12",
 ]
 
@@ -1064,3 +1122,9 @@ dependencies = [
  "quote",
  "syn 2.0.100",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b20717f0917c908dc63de2e44e97f1e6b126ca58d0e391cee86d504eb8fbd05"
