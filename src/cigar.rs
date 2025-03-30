@@ -267,30 +267,33 @@ pub fn erode_cigar_start(
 
 // Merge multiple CIGAR operations vectors
 pub fn merge_cigar_ops(cigar_ops_list: &[&[CigarOp]]) -> Result<Vec<CigarOp>, Box<dyn Error>> {
-    let mut all_ops = Vec::new();
+    // Estimate capacity to avoid reallocations
+    let total_capacity: usize = cigar_ops_list.iter().map(|ops| ops.len()).sum();
+    let mut optimized_ops = Vec::with_capacity(total_capacity);
 
-    // Collect all operations
+    // Track current operation type
+    let mut current_op: Option<CigarOp> = None;
+
+    // Process all operations from all input vectors sequentially
     for &cigar_ops in cigar_ops_list {
-        all_ops.extend_from_slice(cigar_ops);
-    }
-
-    // Optimize by combining adjacent operations of the same type
-    let mut optimized_ops = Vec::new();
-    let mut current_op = None;
-
-    for &op in all_ops.iter() {
-        if let Some(CigarOp(prev_op, prev_count)) = current_op {
-            if prev_op == op.0 {
-                current_op = Some(CigarOp(prev_op, prev_count + op.1));
+        for &op in cigar_ops {
+            if let Some(CigarOp(prev_op, prev_count)) = current_op {
+                if prev_op == op.0 {
+                    // Combine with previous operation
+                    current_op = Some(CigarOp(prev_op, prev_count + op.1));
+                } else {
+                    // Different operation, push previous and update current
+                    optimized_ops.push(CigarOp(prev_op, prev_count));
+                    current_op = Some(op);
+                }
             } else {
-                optimized_ops.push(CigarOp(prev_op, prev_count));
+                // First operation
                 current_op = Some(op);
             }
-        } else {
-            current_op = Some(op);
         }
     }
 
+    // Don't forget to add the last operation
     if let Some(op) = current_op {
         optimized_ops.push(op);
     }
