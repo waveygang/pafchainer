@@ -16,6 +16,9 @@ use pafchainer::cigar::{
     ops_to_cigar, CigarOp,
 };
 
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
+
 #[derive(Parser, Debug)]
 #[clap(
     author,
@@ -559,27 +562,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     info!("Found {} chains in PAF file", chain_index.num_chains());
 
-    // Load sequence databases
-    info!("Loading query sequences from {}...", args.query.display());
-    let query_db = SequenceDB::new(&args.query)?;
-
-    info!("Loading target sequences from {}...", args.target.display());
-    let target_db = SequenceDB::new(&args.target)?;
-
-    // Create output writer
-    let mut writer = match args.output {
+    // Create a writer that is a Boxed trait object implementing Write + Send.
+    let mut writer: Box<dyn Write + Send> = match args.output {
         Some(file_path) => {
             let file = File::create(file_path)?;
-            Box::new(io::BufWriter::new(file)) as Box<dyn Write>
+            Box::new(io::BufWriter::new(file))
         }
-        None => Box::new(io::BufWriter::new(io::stdout())) as Box<dyn Write>,
+        None => Box::new(io::BufWriter::new(io::stdout())),
     };
 
-    // For SAM output, we need to handle the header
+    // For SAM output, we need to handle the header with reference sequences
+    let mut reference_info: HashMap<String, u64> = HashMap::new();
     if args.sam {
-        // Initialize reference tracking and gather target information
-        let mut reference_info: HashMap<String, u64> = HashMap::new();
-
         // First pass: collect reference information
         for chain_id in chain_index.get_chain_ids() {
             let chain_entries = chain_index.load_chain(chain_id)?;
@@ -598,34 +592,47 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Add program information
         write!(writer, "@PG\tID:pafchainer\tPN:pafchainer\tVN:0.1.0\n")?;
-
-        // Second pass: process and write entries
-        for chain_id in chain_index.get_chain_ids() {
-            let chain_entries = chain_index.load_chain(chain_id)?;
-            debug!(
-                "Loaded {} entries for chain {}",
-                chain_entries.len(),
-                chain_id
-            );
-            let chain_result =
-                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
-            let sam_line = paf_entry_to_sam(&chain_result, &query_db, &reference_info)?;
-            writeln!(writer, "{}", sam_line)?;
-        }
-    } else {
-        // For PAF output, we can directly process and write
-        for chain_id in chain_index.get_chain_ids() {
-            let chain_entries = chain_index.load_chain(chain_id)?;
-            debug!(
-                "Loaded {} entries for chain {}",
-                chain_entries.len(),
-                chain_id
-            );
-            let chain_result =
-                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)?;
-            writeln!(writer, "{}", chain_result.to_string())?;
-        }
     }
+
+    // Prepare shared writer
+    let writer = Arc::new(Mutex::new(writer));
+
+    // Process in parallel and write entries
+    chain_index
+        .get_chain_ids()
+        .into_par_iter()
+        .for_each(|chain_id| {
+            // Each thread creates its own FASTA readers.
+            let query_db =
+                SequenceDB::new(&args.query).expect("Failed to open query FASTA in thread");
+            let target_db =
+                SequenceDB::new(&args.target).expect("Failed to open target FASTA in thread");
+
+            // Load and process the chain
+            let chain_entries = chain_index
+                .load_chain(chain_id)
+                .expect("Failed to load chain");
+            debug!(
+                "Loaded {} entries for chain {}",
+                chain_entries.len(),
+                chain_id
+            );
+            let merged_entry =
+                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)
+                    .expect("Failed to process chain");
+
+            // Convert to SAM or PAF format and write immediately
+            if args.sam {
+                let sam_line = paf_entry_to_sam(&merged_entry, &query_db, &reference_info)
+                    .expect("Failed to convert to SAM");
+                let mut writer_lock = writer.lock().expect("Failed to lock writer");
+                writeln!(writer_lock, "{}", sam_line).expect("Failed to write output");
+            } else {
+                let paf_line = merged_entry.to_string();
+                let mut writer_lock = writer.lock().expect("Failed to lock writer");
+                writeln!(writer_lock, "{}", paf_line).expect("Failed to write output");
+            }
+        });
 
     info!("Done!");
     Ok(())
