@@ -313,10 +313,6 @@ fn process_chain(
 
     // Unpack WFA parameters
     let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = *wfa_params;
-    debug!(
-        "WFA parameters: match: 0, mismatch: {}, gap_open1: {}, gap_ext1: {}, gap_open2: {}, gap_ext2: {}",
-        mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
-    );
 
     // Process each pair of adjacent entries
     for i in 0..(sorted_chain.len() - 1) {
