@@ -38,6 +38,13 @@ struct Args {
     #[clap(short, long)]
     target: PathBuf,
 
+    #[clap(
+        long = "wfa-params",
+        default_value = "5,8,2,24,1",
+        help = "WFA alignment parameters: mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2"
+    )]
+    wfa_params: String,
+
     /// Size of boundary erosion in base pairs
     #[clap(short, long, default_value = "100")]
     erosion_size: usize,
@@ -116,7 +123,15 @@ impl SequenceDB {
 }
 
 // Align two sequences using WFA
-fn align_sequences_wfa(query: &[u8], target: &[u8]) -> Result<Vec<CigarOp>, Box<dyn Error>> {
+fn align_sequences_wfa(
+    query: &[u8],
+    target: &[u8],
+    mismatch: i32,
+    gap_open1: i32,
+    gap_ext1: i32,
+    gap_open2: i32,
+    gap_ext2: i32,
+) -> Result<Vec<CigarOp>, Box<dyn Error>> {
     debug!(
         "Performing WFA alignment between sequences of lengths {} and {}",
         query.len(),
@@ -124,20 +139,8 @@ fn align_sequences_wfa(query: &[u8], target: &[u8]) -> Result<Vec<CigarOp>, Box<
     );
 
     // Initialize WFA aligner with gap-affine penalties
-    let match_score = 0;
-    let mismatch = 3;
-    let gap_open1 = 4;
-    let gap_ext1 = 2;
-    let gap_open2 = 24;
-    let gap_ext2 = 1;
-
     let aligner = AffineWavefronts::with_penalties_affine2p(
-        match_score,
-        mismatch,
-        gap_open1,
-        gap_ext1,
-        gap_open2,
-        gap_ext2,
+        0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
     );
 
     // Perform alignment (note that WFA expects target, query order)
@@ -293,6 +296,7 @@ fn process_chain(
     query_db: &SequenceDB,
     target_db: &SequenceDB,
     erosion_size: usize,
+    wfa_params: &(i32, i32, i32, i32, i32),
 ) -> Result<PafEntry, Box<dyn Error>> {
     // Handle simple cases
     if chain.len() <= 1 {
@@ -306,6 +310,9 @@ fn process_chain(
 
     // Start with the first entry as our base for merging
     let mut merged_entry = sorted_chain[0].clone();
+
+    // Unpack WFA parameters
+    let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = *wfa_params;
 
     // Process each pair of adjacent entries
     for i in 0..(sorted_chain.len() - 1) {
@@ -504,7 +511,15 @@ fn process_chain(
             )?;
 
             // Align the gap sequences
-            align_sequences_wfa(&gap_query_seq, &gap_target_seq)?
+            align_sequences_wfa(
+                &gap_query_seq,
+                &gap_target_seq,
+                mismatch,
+                gap_open1,
+                gap_ext1,
+                gap_open2,
+                gap_ext2,
+            )?
         };
 
         // Merge CIGARs
@@ -547,6 +562,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads.into())
         .build_global()?;
+
+    // Parse WFA parameters
+    let wfa_params = {
+        let parts: Vec<i32> = args
+            .wfa_params
+            .split(',')
+            .map(|s| s.trim().parse::<i32>())
+            .collect::<Result<Vec<i32>, _>>()?;
+
+        if parts.len() != 5 {
+            return Err("WFA parameters must have exactly 5 values: mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2".into());
+        }
+
+        (parts[0], parts[1], parts[2], parts[3], parts[4])
+    };
 
     // Check for or build chain index
     let index_path = args.paf.with_extension("cidx"); // Chain index file
@@ -617,9 +647,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 chain_entries.len(),
                 chain_id
             );
-            let merged_entry =
-                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size)
-                    .expect("Failed to process chain");
+            let merged_entry = process_chain(
+                &chain_entries,
+                &query_db,
+                &target_db,
+                args.erosion_size,
+                &wfa_params,
+            )
+            .expect("Failed to process chain");
 
             // Convert to SAM or PAF format and write immediately
             if args.sam {
