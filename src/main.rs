@@ -46,7 +46,7 @@ struct Args {
     wfa_params: String,
 
     /// Size of boundary erosion in base pairs
-    #[clap(short, long, default_value = "100")]
+    #[clap(short, long, default_value = "200")]
     erosion_size: usize,
 
     /// Output PAF file
