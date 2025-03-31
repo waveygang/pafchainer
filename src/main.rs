@@ -38,8 +38,11 @@ struct Args {
     #[clap(short, long)]
     target: PathBuf,
 
-    #[clap(long = "wfa-params", default_value = "5,8,2,24,1", 
-    help = "WFA alignment parameters: mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2")]
+    #[clap(
+        long = "wfa-params",
+        default_value = "5,8,2,24,1",
+        help = "WFA alignment parameters: mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2"
+    )]
     wfa_params: String,
 
     /// Size of boundary erosion in base pairs
@@ -121,13 +124,13 @@ impl SequenceDB {
 
 // Align two sequences using WFA
 fn align_sequences_wfa(
-    query: &[u8], 
-    target: &[u8], 
+    query: &[u8],
+    target: &[u8],
     mismatch: i32,
     gap_open1: i32,
     gap_ext1: i32,
     gap_open2: i32,
-    gap_ext2: i32
+    gap_ext2: i32,
 ) -> Result<Vec<CigarOp>, Box<dyn Error>> {
     debug!(
         "Performing WFA alignment between sequences of lengths {} and {}",
@@ -137,12 +140,7 @@ fn align_sequences_wfa(
 
     // Initialize WFA aligner with gap-affine penalties
     let aligner = AffineWavefronts::with_penalties_affine2p(
-        0,
-        mismatch,
-        gap_open1,
-        gap_ext1,
-        gap_open2,
-        gap_ext2,
+        0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
     );
 
     // Perform alignment (note that WFA expects target, query order)
@@ -571,15 +569,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Parse WFA parameters
     let wfa_params = {
-        let parts: Vec<i32> = args.wfa_params
+        let parts: Vec<i32> = args
+            .wfa_params
             .split(',')
             .map(|s| s.trim().parse::<i32>())
             .collect::<Result<Vec<i32>, _>>()?;
-        
+
         if parts.len() != 5 {
             return Err("WFA parameters must have exactly 5 values: mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2".into());
         }
-        
+
         (parts[0], parts[1], parts[2], parts[3], parts[4])
     };
 
@@ -652,9 +651,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 chain_entries.len(),
                 chain_id
             );
-            let merged_entry =
-                process_chain(&chain_entries, &query_db, &target_db, args.erosion_size, &wfa_params)
-                    .expect("Failed to process chain");
+            let merged_entry = process_chain(
+                &chain_entries,
+                &query_db,
+                &target_db,
+                args.erosion_size,
+                &wfa_params,
+            )
+            .expect("Failed to process chain");
 
             // Convert to SAM or PAF format and write immediately
             if args.sam {
