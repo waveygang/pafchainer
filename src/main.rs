@@ -58,7 +58,7 @@ struct Args {
     sam: bool,
 
     /// Number of threads to use
-    #[clap(short, long, default_value = "4")]
+    #[clap(long, default_value = "4")]
     threads: NonZeroUsize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
