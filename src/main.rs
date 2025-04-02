@@ -54,7 +54,7 @@ struct Args {
     output: Option<PathBuf>,
 
     /// Output in SAM format instead of PAF
-    #[clap(long)]
+    #[clap(short = 'a', long)]
     sam: bool,
 
     /// Number of threads to use
