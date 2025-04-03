@@ -579,7 +579,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     // Check for or build chain index
-    let index_path = args.paf.with_extension("cidx"); // Chain index file
+    let index_path = PathBuf::from(format!("{}.cidx", args.paf.to_string_lossy()));
     let chain_index = if index_path.exists() {
         info!("Loading chain index from {}...", index_path.display());
         ChainIndex::load(&index_path)?
