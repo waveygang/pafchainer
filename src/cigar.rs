@@ -80,7 +80,7 @@ pub fn erode_cigar_end(
     query_bp_limit: usize,
     target_bp_limit: usize,
 ) -> Result<(Vec<CigarOp>, usize, usize), Box<dyn Error>> {
-    let mut new_ops = Vec::new();
+    let mut new_ops_reversed = Vec::new();
     let mut remaining_query_bp = query_bp_limit;
     let mut remaining_target_bp = target_bp_limit;
     let mut query_bases_removed = 0;
@@ -110,7 +110,7 @@ pub fn erode_cigar_end(
 
                     if actual_erosion < count {
                         // Partial erosion
-                        new_ops.insert(0, CigarOp(op, count - actual_erosion));
+                        new_ops_reversed.push(CigarOp(op, count - actual_erosion));
                     }
 
                     query_bases_removed += actual_erosion;
@@ -119,7 +119,7 @@ pub fn erode_cigar_end(
                     remaining_target_bp = remaining_target_bp.saturating_sub(actual_erosion);
                 } else {
                     // No more erosion needed
-                    new_ops.insert(0, CigarOp(op, count));
+                    new_ops_reversed.push(CigarOp(op, count));
                 }
             }
             'I' => {
@@ -129,14 +129,14 @@ pub fn erode_cigar_end(
 
                     if actual_erosion < count {
                         // Partial erosion
-                        new_ops.insert(0, CigarOp(op, count - actual_erosion));
+                        new_ops_reversed.push(CigarOp(op, count - actual_erosion));
                     }
 
                     query_bases_removed += actual_erosion;
                     remaining_query_bp = remaining_query_bp.saturating_sub(actual_erosion);
                 } else {
                     // No more query erosion needed
-                    new_ops.insert(0, CigarOp(op, count));
+                    new_ops_reversed.push(CigarOp(op, count));
                 }
             }
             'D' => {
@@ -146,26 +146,29 @@ pub fn erode_cigar_end(
 
                     if actual_erosion < count {
                         // Partial erosion
-                        new_ops.insert(0, CigarOp(op, count - actual_erosion));
+                        new_ops_reversed.push(CigarOp(op, count - actual_erosion));
                     }
 
                     target_bases_removed += actual_erosion;
                     remaining_target_bp = remaining_target_bp.saturating_sub(actual_erosion);
                 } else {
                     // No more target erosion needed
-                    new_ops.insert(0, CigarOp(op, count));
+                    new_ops_reversed.push(CigarOp(op, count));
                 }
             }
-            _ => new_ops.insert(0, CigarOp(op, count)), // Keep other operations
+            _ => new_ops_reversed.push(CigarOp(op, count)), // Keep other operations
         }
 
         i += 1;
     }
 
-    // Add remaining operations
-    for j in 0..(cigar_ops.len() - i) {
-        new_ops.insert(j, cigar_ops[j]);
-    }
+    // Reverse the eroded part to restore the original order.
+    new_ops_reversed.reverse();
+
+    // Combine the unprocessed (beginning) portion with the processed (eroded) part.
+    let mut new_ops = Vec::with_capacity(cigar_ops.len() - i + new_ops_reversed.len());
+    new_ops.extend_from_slice(&cigar_ops[..(cigar_ops.len() - i)]);
+    new_ops.extend(new_ops_reversed);
 
     Ok((new_ops, query_bases_removed, target_bases_removed))
 }
