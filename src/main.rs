@@ -204,10 +204,17 @@ fn paf_entry_to_sam(
         entry.chain_id, entry.chain_length, entry.chain_pos
     ));
 
+    let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, _) = calculate_cigar_stats(&entry.cigar_ops).expect("Failed to calculate CIGAR stats");
+
     // Add NM tag (edit distance)
-    let (matches, mismatches, _, ins_bp, _, del_bp, _) = calculate_cigar_stats(&entry.cigar_ops)?;
-    let edit_distance = mismatches + ins_bp + del_bp;
+    let edit_distance = mismatches + inserted_bp + deleted_bp;
     optional_fields.push(format!("NM:i:{}", edit_distance));
+
+    // Format bi and gi fields without trailing zeros
+    let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+    let block_identity = (matches as f64) / (matches + edit_distance) as f64;
+    optional_fields.push(format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string());
+    optional_fields.push(format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string());
 
     // Add AS tag (alignment score)
     // Simple scoring: +1 for match, -1 for mismatch/indel
@@ -230,64 +237,6 @@ fn paf_entry_to_sam(
     );
 
     Ok(sam_line)
-}
-
-// Helper function to update tags in a PafEntry
-fn update_tags(
-    tags: &[(String, String)],
-    cigar_ops: &[CigarOp],
-    chain_id: u64,
-) -> Vec<(String, String)> {
-    let mut new_tags = Vec::with_capacity(tags.len());
-    for (tag, value) in tags {
-        if tag == "cg:Z" {
-            new_tags.push((tag.clone(), ops_to_cigar(cigar_ops)));
-        } else if tag == "ch:Z" {
-            new_tags.push((tag.clone(), format!("{}.1.1", chain_id)));
-        } else {
-            new_tags.push((tag.clone(), value.clone()));
-        }
-    }
-    new_tags
-}
-
-// Helper function to create a merged PafEntry
-fn create_merged_entry(
-    base_entry: &PafEntry,
-    next_entry: &PafEntry,
-    merged_ops: &[CigarOp],
-) -> PafEntry {
-    // Calculate statistics from merged CIGAR
-    let (matches, _, _, _, _, _, block_len) =
-        calculate_cigar_stats(merged_ops).expect("Failed to calculate CIGAR stats");
-
-    // Adjust target range based on strand
-    let (adjusted_target_start, adjusted_target_end) = if base_entry.strand == '-' {
-        (next_entry.target_start, base_entry.target_end)
-    } else {
-        (base_entry.target_start, next_entry.target_end)
-    };
-
-    // Create the merged entry
-    PafEntry {
-        query_name: base_entry.query_name.clone(),
-        query_length: base_entry.query_length,
-        query_start: base_entry.query_start,
-        query_end: next_entry.query_end,
-        strand: base_entry.strand,
-        target_name: base_entry.target_name.clone(),
-        target_length: base_entry.target_length,
-        target_start: adjusted_target_start,
-        target_end: adjusted_target_end,
-        num_matches: matches,
-        alignment_length: block_len,
-        mapping_quality: base_entry.mapping_quality,
-        tags: update_tags(&base_entry.tags, merged_ops, base_entry.chain_id),
-        chain_id: base_entry.chain_id,
-        chain_length: 1,
-        chain_pos: 1,
-        cigar_ops: merged_ops.to_vec(),
-    }
 }
 
 // Process a chain
@@ -318,8 +267,7 @@ fn process_chain(
     for i in 0..(sorted_chain.len() - 1) {
         debug!("\tProcessing entries {} and {}", i, i + 1);
 
-        // Get the current base entry and the next entry to merge
-        let current = &merged_entry;
+        // Get the next entry to merge
         let next = &sorted_chain[i + 1];
 
         debug!(
@@ -340,25 +288,25 @@ fn process_chain(
         );
 
         // Check for query overlap
-        let query_overlap = if next.query_start < current.query_end {
+        let query_overlap = if next.query_start < merged_entry.query_end {
             // Calculate actual overlap size in base pairs
-            current.query_end.saturating_sub(next.query_start) as usize
+            merged_entry.query_end.saturating_sub(next.query_start) as usize
         } else {
             0
         };
 
         // Check for target overlap with inverted logic for reverse strand
-        let target_overlap = if current.strand == '-' {
-            if next.target_end > current.target_start {
+        let target_overlap = if merged_entry.strand == '-' {
+            if next.target_end > merged_entry.target_start {
                 // Calculate actual overlap size in base pairs
-                next.target_end.saturating_sub(current.target_start) as usize
+                next.target_end.saturating_sub(merged_entry.target_start) as usize
             } else {
                 0
             }
         } else {
-            if next.target_start < current.target_end {
+            if next.target_start < merged_entry.target_end {
                 // Calculate actual overlap size in base pairs
-                current.target_end.saturating_sub(next.target_start) as usize
+                merged_entry.target_end.saturating_sub(next.target_start) as usize
             } else {
                 0
             }
@@ -402,23 +350,23 @@ fn process_chain(
         // Erode CIGARs at boundaries with the effective erosion sizes
         let (eroded_current_cigar_ops, current_query_removed, current_target_removed) =
             if min_query_erosion_size > 0 || min_target_erosion_size > 0 {
-                if current.strand == '-' {
+                if merged_entry.strand == '-' {
                     // For reverse strand, erode the start of the current entry
                     erode_cigar_start(
-                        &current.cigar_ops,
+                        &merged_entry.cigar_ops,
                         min_query_erosion_size,
                         min_target_erosion_size,
                     )?
                 } else {
                     // For forward strand, erode the end of the current entry
                     erode_cigar_end(
-                        &current.cigar_ops,
+                        &merged_entry.cigar_ops,
                         min_query_erosion_size,
                         min_target_erosion_size,
                     )?
                 }
             } else {
-                (current.cigar_ops.clone(), 0, 0)
+                (merged_entry.cigar_ops.clone(), 0, 0)
             };
         debug!(
             "\tEroded CIGARs - Current: query: {}, target: {}",
@@ -431,7 +379,7 @@ fn process_chain(
             if (min_query_erosion_size > 0 && query_overlap == 0)
                 || (min_target_erosion_size > 0 && target_overlap == 0)
             {
-                if current.strand == '-' {
+                if merged_entry.strand == '-' {
                     // For reverse strand, erode the end of the next entry
                     erode_cigar_end(
                         &next.cigar_ops,
@@ -455,19 +403,20 @@ fn process_chain(
         );
 
         // Calculate gap coordinates accounting for erosion
-        let query_gap_start = current.query_end - current_query_removed as u64;
+        let query_gap_start = merged_entry.query_end - current_query_removed as u64;
         let query_gap_end = next.query_start + next_query_removed as u64;
+        
         // Check the strand to determine the target gap coordinates
-        let (target_gap_start, target_gap_end) = if current.strand == '-' {
+        let (target_gap_start, target_gap_end) = if merged_entry.strand == '-' {
             // For reverse strand, subtract the erosion from the start of the next entry
             (
                 next.target_end - next_target_removed as u64,
-                current.target_start + current_target_removed as u64,
+                merged_entry.target_start + current_target_removed as u64,
             )
         } else {
             // For forward strand, add the erosion to the start of the next entry
             (
-                current.target_end - current_target_removed as u64,
+                merged_entry.target_end - current_target_removed as u64,
                 next.target_start + next_target_removed as u64,
             )
         };
@@ -497,14 +446,14 @@ fn process_chain(
         } else {
             // Both query and target have gaps - perform alignment
             let gap_query_seq = query_db.get_subsequence(
-                &current.query_name,
+                &merged_entry.query_name,
                 query_gap_start,
                 query_gap_end,
-                current.strand == '-',
+                merged_entry.strand == '-',
             )?;
 
             let gap_target_seq = target_db.get_subsequence(
-                &current.target_name,
+                &merged_entry.target_name,
                 target_gap_start,
                 target_gap_end,
                 false,
@@ -523,15 +472,56 @@ fn process_chain(
         };
 
         // Merge CIGARs
-        let merged_cigar = if current.strand == '-' {
+        merged_entry.cigar_ops = if merged_entry.strand == '-' {
             merge_cigar_ops(&[&eroded_next_cigar_ops, &gap_ops, &eroded_current_cigar_ops])?
         } else {
             merge_cigar_ops(&[&eroded_current_cigar_ops, &gap_ops, &eroded_next_cigar_ops])?
         };
 
-        // Create the merged entry
-        merged_entry = create_merged_entry(current, next, &merged_cigar);
+        // Update only the necessary fields of the merged entry
+        merged_entry.query_end = next.query_end;
+        
+        // Adjust target boundaries based on strand
+        if merged_entry.strand == '-' {
+            merged_entry.target_start = next.target_start;
+        } else {
+            merged_entry.target_end = next.target_end;
+        }
     }
+
+    // Now that all merging is complete, update the remaining fields based on the final merged CIGAR
+    let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = calculate_cigar_stats(&merged_entry.cigar_ops).expect("Failed to calculate CIGAR stats");
+
+    // Update the merged entry with final statistics
+    merged_entry.num_matches = matches;
+    merged_entry.alignment_length = block_len;
+    merged_entry.chain_length = 1;
+    merged_entry.chain_pos = 1;
+    
+    // Update tags
+    let mut new_tags = Vec::with_capacity(merged_entry.tags.len());
+
+    let edit_distance = mismatches + inserted_bp + deleted_bp;
+    let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+    let block_identity = (matches as f64) / (matches + edit_distance) as f64;
+
+    // Format bi and gi fields without trailing zeros
+    for (tag, value) in &merged_entry.tags {
+        if tag == "cg:Z" {
+            new_tags.push((tag.clone(), ops_to_cigar(&merged_entry.cigar_ops)));
+        } else if tag == "ch:Z" {
+            new_tags.push((tag.clone(), format!("{}.1.1", merged_entry.chain_id)));
+        } else if tag == "gi:f" {
+            new_tags.push((tag.clone(), format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string()));
+        } else if tag == "bi:f" {
+            new_tags.push((tag.clone(), format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string()));
+        } else if tag == "md:f" {
+            // Drop it
+        } else {
+            new_tags.push((tag.clone(), value.clone()));
+        }
+    }
+    merged_entry.tags = new_tags;
 
     debug!(
         "\tMerged query {}-{}; {}; target {}-{}",
