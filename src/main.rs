@@ -213,8 +213,8 @@ fn paf_entry_to_sam(
     // Format bi and gi fields without trailing zeros
     let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
     let block_identity = (matches as f64) / (matches + edit_distance) as f64;
-    optional_fields.push(format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string());
-    optional_fields.push(format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string());
+    optional_fields.push(format!("gi:f:{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string());
+    optional_fields.push(format!("bi:f:{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string());
 
     // Add AS tag (alignment score)
     // Simple scoring: +1 for match, -1 for mismatch/indel
