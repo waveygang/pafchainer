@@ -204,17 +204,29 @@ fn paf_entry_to_sam(
         entry.chain_id, entry.chain_length, entry.chain_pos
     ));
 
-    let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, _) = calculate_cigar_stats(&entry.cigar_ops).expect("Failed to calculate CIGAR stats");
+    let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, _) =
+        calculate_cigar_stats(&entry.cigar_ops).expect("Failed to calculate CIGAR stats");
 
     // Add NM tag (edit distance)
     let edit_distance = mismatches + inserted_bp + deleted_bp;
     optional_fields.push(format!("NM:i:{}", edit_distance));
 
     // Format bi and gi fields without trailing zeros
-    let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+    let gap_compressed_identity =
+        (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
     let block_identity = (matches as f64) / (matches + edit_distance) as f64;
-    optional_fields.push(format!("gi:f:{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string());
-    optional_fields.push(format!("bi:f:{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string());
+    optional_fields.push(
+        format!("gi:f:{:.6}", gap_compressed_identity)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string(),
+    );
+    optional_fields.push(
+        format!("bi:f:{:.6}", block_identity)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string(),
+    );
 
     // Add AS tag (alignment score)
     // Simple scoring: +1 for match, -1 for mismatch/indel
@@ -405,7 +417,7 @@ fn process_chain(
         // Calculate gap coordinates accounting for erosion
         let query_gap_start = merged_entry.query_end - current_query_removed as u64;
         let query_gap_end = next.query_start + next_query_removed as u64;
-        
+
         // Check the strand to determine the target gap coordinates
         let (target_gap_start, target_gap_end) = if merged_entry.strand == '-' {
             // For reverse strand, subtract the erosion from the start of the next entry
@@ -480,7 +492,7 @@ fn process_chain(
 
         // Update only the necessary fields of the merged entry
         merged_entry.query_end = next.query_end;
-        
+
         // Adjust target boundaries based on strand
         if merged_entry.strand == '-' {
             merged_entry.target_start = next.target_start;
@@ -490,19 +502,21 @@ fn process_chain(
     }
 
     // Now that all merging is complete, update the remaining fields based on the final merged CIGAR
-    let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = calculate_cigar_stats(&merged_entry.cigar_ops).expect("Failed to calculate CIGAR stats");
+    let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) =
+        calculate_cigar_stats(&merged_entry.cigar_ops).expect("Failed to calculate CIGAR stats");
 
     // Update the merged entry with final statistics
     merged_entry.num_matches = matches;
     merged_entry.alignment_length = block_len;
     merged_entry.chain_length = 1;
     merged_entry.chain_pos = 1;
-    
+
     // Update tags
     let mut new_tags = Vec::with_capacity(merged_entry.tags.len());
 
     let edit_distance = mismatches + inserted_bp + deleted_bp;
-    let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+    let gap_compressed_identity =
+        (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
     let block_identity = (matches as f64) / (matches + edit_distance) as f64;
 
     // Format bi and gi fields without trailing zeros
@@ -512,9 +526,21 @@ fn process_chain(
         } else if tag == "ch:Z" {
             new_tags.push((tag.clone(), format!("{}.1.1", merged_entry.chain_id)));
         } else if tag == "gi:f" {
-            new_tags.push((tag.clone(), format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string()));
+            new_tags.push((
+                tag.clone(),
+                format!("{:.6}", gap_compressed_identity)
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_string(),
+            ));
         } else if tag == "bi:f" {
-            new_tags.push((tag.clone(), format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string()));
+            new_tags.push((
+                tag.clone(),
+                format!("{:.6}", block_identity)
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_string(),
+            ));
         } else if tag == "md:f" {
             // Drop it
         } else {
