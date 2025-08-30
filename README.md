@@ -18,27 +18,11 @@ A tool for processing PAF (Pairwise Alignment Format) files and merging alignmen
 
 ## Installation
 
-You need to build `WFA2-lib` (commit `df3dce4b99c37ac4f34fdcef74b774c80b7fadc4`) first, which is a submodule of this repository. To do so, run:
+Clone the repository and build using Cargo:
 
 ```shell
 git clone https://github.com/waveygang/pafchainer
-cd pafchainer/WFA2-lib
-
-# Temporary fix for the static-band issue (https://github.com/smarco/WFA2-lib/issues/110#issuecomment-2703867791)
-curl https://gist.githubusercontent.com/quim0/36a7f1a1c0f52d396e61eec94408cc46/raw/02b118bee2b9b3c6e690ae82f22650b07c719ad5/gistfile1.txt > fix.patch
-git apply fix.patch
-
-make clean all
-cd ..
-```
-
-Then, you can build `pafchainer` using Cargo:
-
-```shell
-# Point to your pre-built WFA2-lib directory
-export WFA2LIB_PATH="./WFA2-lib"
-
-# Build pafchainer
+cd pafchainer
 cargo build --release
 ```
 

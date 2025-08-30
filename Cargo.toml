@@ -6,20 +6,20 @@ authors = ["Andrea Guarracino <aguarra1@uthsc.edu>"]
 description = "A tool to process PAF files and connect chains using WFA2 alignment"
 
 [dependencies]
-clap = { version = "4.5.35", features = ["derive"] }
+clap = { version = "4.5.46", features = ["derive"] }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
-flate2 = "1.1.1"
+flate2 = "1.1.2"
 
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "fd0c39a0cd586efc4155e48fbd95aa0dfdef5f56"}
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 
 log = "0.4.27"
 env_logger = "0.11.8"
 
-rayon = "1.10.0" # Parallel processing library
+rayon = "1.11.0" # Parallel processing library
 
-thiserror = "2.0.12"
-libc = "0.2.171"
+thiserror = "2.0.16"
+libc = "0.2.172"
 noodles = { version = "0.95.0", features = ["bgzf"] }
 serde = { version = "1.0.219", features = ["derive"] }
 bincode = "1.3.3"
