@@ -1,6 +1,7 @@
 use noodles::bgzf;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
@@ -132,11 +133,20 @@ pub struct ChainEntryInfo {
     pub chain_pos: u64,
 }
 
+/// Composite key for grouping chain entries
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChainKey {
+    pub chain_id: u64,
+    pub query_name: String,
+    pub target_name: String,
+    pub strand: char,
+}
+
 /// Index structure for efficient processing of PAF chains
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChainIndex {
-    /// Maps chain_id to a vector of file offsets
-    pub chains: HashMap<u64, Vec<ChainEntryInfo>>,
+    /// Maps composite key to a vector of file offsets
+    pub chains: HashMap<ChainKey, Vec<ChainEntryInfo>>,
     /// Path to the PAF file
     pub paf_file: String,
     /// Whether the PAF file is compressed
@@ -175,7 +185,7 @@ impl ChainIndex {
     /// Build index for a compressed PAF file using virtual offsets
     fn build_index_for_compressed_file(
         paf_path: &Path,
-        chains: &mut HashMap<u64, Vec<ChainEntryInfo>>,
+        chains: &mut HashMap<ChainKey, Vec<ChainEntryInfo>>,
     ) -> Result<(), Box<dyn Error>> {
         let file = File::open(paf_path)?;
         let mut reader = bgzf::Reader::new(file);
@@ -204,8 +214,14 @@ impl ChainIndex {
                     length: bytes_read,
                     chain_pos: entry.chain_pos,
                 };
+                let chain_key = ChainKey {
+                    chain_id: entry.chain_id,
+                    query_name: entry.query_name.clone(),
+                    target_name: entry.target_name.clone(),
+                    strand: entry.strand,
+                };
                 chains
-                    .entry(entry.chain_id)
+                    .entry(chain_key)
                     .or_insert_with(Vec::new)
                     .push(chain_entry);
             }
@@ -217,7 +233,7 @@ impl ChainIndex {
     /// Build index for an uncompressed PAF file
     fn build_index_for_uncompressed_file(
         paf_path: &Path,
-        chains: &mut HashMap<u64, Vec<ChainEntryInfo>>,
+        chains: &mut HashMap<ChainKey, Vec<ChainEntryInfo>>,
     ) -> Result<(), Box<dyn Error>> {
         let file = File::open(paf_path)?;
         let reader = BufReader::new(file);
@@ -234,8 +250,14 @@ impl ChainIndex {
                     length: line_len,
                     chain_pos: entry.chain_pos,
                 };
+                let chain_key = ChainKey {
+                    chain_id: entry.chain_id,
+                    query_name: entry.query_name.clone(),
+                    target_name: entry.target_name.clone(),
+                    strand: entry.strand,
+                };
                 chains
-                    .entry(entry.chain_id)
+                    .entry(chain_key)
                     .or_insert_with(Vec::new)
                     .push(chain_entry);
             }
@@ -262,24 +284,24 @@ impl ChainIndex {
         Ok(index)
     }
 
-    /// Load all entries for a specific chain
-    pub fn load_chain(&self, chain_id: u64) -> Result<Vec<PafEntry>, Box<dyn Error>> {
-        let entries = match self.chains.get(&chain_id) {
+    /// Load all entries for a specific chain key
+    pub fn load_chain(&self, chain_key: &ChainKey) -> Result<Vec<PafEntry>, Box<dyn Error>> {
+        let entries = match self.chains.get(chain_key) {
             Some(entries) => entries,
             None => return Ok(Vec::new()),
         };
 
         if self.is_compressed {
-            self.load_chain_compressed(chain_id, entries)
+            self.load_chain_compressed(chain_key, entries)
         } else {
-            self.load_chain_uncompressed(chain_id, entries)
+            self.load_chain_uncompressed(chain_key, entries)
         }
     }
 
     /// Load chain entries from a compressed file using virtual offsets
     fn load_chain_compressed(
         &self,
-        chain_id: u64,
+        chain_key: &ChainKey,
         entries: &[ChainEntryInfo],
     ) -> Result<Vec<PafEntry>, Box<dyn Error>> {
         let file = File::open(&self.paf_file)?;
@@ -297,13 +319,19 @@ impl ChainIndex {
 
             let line = std::str::from_utf8(&buffer[..buffer.len() - 1])?; // Remove newline
             if let Ok(paf_entry) = PafEntry::parse_from_line(line) {
-                // Verify chain_id matches
-                if paf_entry.chain_id == chain_id {
+                // Verify chain key matches
+                let entry_key = ChainKey {
+                    chain_id: paf_entry.chain_id,
+                    query_name: paf_entry.query_name.clone(),
+                    target_name: paf_entry.target_name.clone(),
+                    strand: paf_entry.strand,
+                };
+                if entry_key == *chain_key {
                     paf_entries.push(paf_entry);
                 } else {
                     return Err(format!(
-                        "Chain ID mismatch: expected {}, got {}",
-                        chain_id, paf_entry.chain_id
+                        "Chain key mismatch: expected {:?}, got {:?}",
+                        chain_key, entry_key
                     )
                     .into());
                 }
@@ -316,7 +344,7 @@ impl ChainIndex {
     /// Load chain entries from an uncompressed file
     fn load_chain_uncompressed(
         &self,
-        chain_id: u64,
+        chain_key: &ChainKey,
         entries: &[ChainEntryInfo],
     ) -> Result<Vec<PafEntry>, Box<dyn Error>> {
         let file = File::open(&self.paf_file)?;
@@ -331,13 +359,19 @@ impl ChainIndex {
 
             let line = std::str::from_utf8(&buffer[..buffer.len() - 1])?; // Remove newline
             if let Ok(paf_entry) = PafEntry::parse_from_line(line) {
-                // Verify chain_id matches
-                if paf_entry.chain_id == chain_id {
+                // Verify chain key matches
+                let entry_key = ChainKey {
+                    chain_id: paf_entry.chain_id,
+                    query_name: paf_entry.query_name.clone(),
+                    target_name: paf_entry.target_name.clone(),
+                    strand: paf_entry.strand,
+                };
+                if entry_key == *chain_key {
                     paf_entries.push(paf_entry);
                 } else {
                     return Err(format!(
-                        "Chain ID mismatch: expected {}, got {}",
-                        chain_id, paf_entry.chain_id
+                        "Chain key mismatch: expected {:?}, got {:?}",
+                        chain_key, entry_key
                     )
                     .into());
                 }
@@ -347,9 +381,14 @@ impl ChainIndex {
         Ok(paf_entries)
     }
 
-    /// Get a list of all chain IDs in the index
-    pub fn get_chain_ids(&self) -> Vec<u64> {
+    /// Get a list of all chain keys in the index
+    pub fn get_chain_keys(&self) -> Vec<ChainKey> {
         self.chains.keys().cloned().collect()
+    }
+
+    /// Get a list of all chain IDs in the index (for backward compatibility)
+    pub fn get_chain_ids(&self) -> Vec<u64> {
+        self.chains.keys().map(|k| k.chain_id).collect()
     }
 
     /// Get the number of chains in the index

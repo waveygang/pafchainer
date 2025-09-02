@@ -621,8 +621,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut reference_info: HashMap<String, u64> = HashMap::new();
     if args.sam {
         // First pass: collect reference information
-        for chain_id in chain_index.get_chain_ids() {
-            let chain_entries = chain_index.load_chain(chain_id)?;
+        for chain_key in chain_index.get_chain_keys() {
+            let chain_entries = chain_index.load_chain(&chain_key)?;
             for entry in &chain_entries {
                 reference_info.insert(entry.target_name.clone(), entry.target_length);
             }
@@ -645,9 +645,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Process in parallel and write entries
     chain_index
-        .get_chain_ids()
+        .get_chain_keys()
         .into_par_iter()
-        .for_each(|chain_id| {
+        .for_each(|chain_key| {
             // Each thread creates its own FASTA readers.
             let query_db =
                 SequenceDB::new(&args.query).expect("Failed to open query FASTA in thread");
@@ -656,12 +656,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Load and process the chain
             let chain_entries = chain_index
-                .load_chain(chain_id)
+                .load_chain(&chain_key)
                 .expect("Failed to load chain");
             debug!(
-                "Loaded {} entries for chain {}",
+                "Loaded {} entries for chain {:?}",
                 chain_entries.len(),
-                chain_id
+                chain_key
             );
             let merged_entry = process_chain(
                 &chain_entries,
